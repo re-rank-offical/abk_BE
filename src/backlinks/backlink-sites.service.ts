@@ -139,7 +139,13 @@ export class BacklinkSitesService {
         `${site.wordpressUsername}:${site.wordpressAppPassword}`,
       ).toString('base64');
 
-      const response = await fetch(`${site.wordpressApiUrl}/wp/v2/posts`, {
+      // wordpressApiUrl이 /wp/v2로 끝나는 경우 /posts만 추가, 아니면 /wp/v2/posts 추가
+      const wpApiBase = site.wordpressApiUrl.replace(/\/+$/, '');
+      const postsUrl = wpApiBase.endsWith('/wp/v2')
+        ? `${wpApiBase}/posts`
+        : `${wpApiBase}/wp/v2/posts`;
+
+      const response = await fetch(postsUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -298,8 +304,16 @@ export class BacklinkSitesService {
         await page.waitForTimeout(5000);
       }
 
-      // 7. 등록 후 URL 수집
+      // 7. 등록 후 URL 수집 및 검증
       const currentUrl = page.url();
+
+      // 글쓰기 페이지에 그대로 머물러 있으면 실패로 판단
+      if (site.writeUrl && currentUrl === site.writeUrl) {
+        return {
+          success: false,
+          error: `등록 후에도 글쓰기 페이지에 머물러 있습니다. 실제 등록이 이루어지지 않았을 수 있습니다. (URL: ${currentUrl})`,
+        };
+      }
 
       return { success: true, publishedUrl: currentUrl };
     } catch (err) {
@@ -449,10 +463,30 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // 5. 본문 입력 - 티스토리 에디터 (iframe 또는 contenteditable)
+      // 5. 본문 입력 - 티스토리 에디터
       let bodyInserted = false;
 
-      // 방법 1: iframe 기반 에디터 (가장 일반적인 티스토리 에디터 구조)
+      // 방법 0: CKEditor API 사용 (가장 확실한 방법 - 에디터 내부 상태에 직접 반영)
+      if (!bodyInserted) {
+        bodyInserted = await page.evaluate((html) => {
+          try {
+            const ck = (window as any).CKEDITOR;
+            if (ck && ck.instances) {
+              const keys = Object.keys(ck.instances);
+              if (keys.length > 0) {
+                ck.instances[keys[0]].setData(html);
+                return true;
+              }
+            }
+          } catch { /* ignore */ }
+          return false;
+        }, body);
+        if (bodyInserted) {
+          this.logger.log('CKEditor API로 본문 삽입 성공');
+        }
+      }
+
+      // 방법 1: iframe 기반 에디터 + CKEditor 동기화
       if (!bodyInserted) {
         const iframeSelectors = [
           'iframe#editor-tistory',
@@ -475,8 +509,24 @@ export class BacklinkSitesService {
                   await frameBody.click();
                   await frame.evaluate((html) => {
                     document.body.innerHTML = html;
+                    // 에디터 프레임워크에 변경 통지
+                    document.body.dispatchEvent(new Event('input', { bubbles: true }));
+                    document.body.dispatchEvent(new Event('change', { bubbles: true }));
+                  }, body);
+                  // iframe 본문 설정 후 부모 페이지의 CKEditor API로도 동기화 시도
+                  await page.evaluate((html) => {
+                    try {
+                      const ck = (window as any).CKEDITOR;
+                      if (ck && ck.instances) {
+                        const keys = Object.keys(ck.instances);
+                        if (keys.length > 0) {
+                          ck.instances[keys[0]].setData(html);
+                        }
+                      }
+                    } catch { /* ignore */ }
                   }, body);
                   bodyInserted = true;
+                  this.logger.log(`iframe 에디터로 본문 삽입 (${sel})`);
                   break;
                 }
               }
@@ -485,7 +535,7 @@ export class BacklinkSitesService {
         }
       }
 
-      // 방법 2: contenteditable 기반 에디터 (iframe 없이 직접 DOM)
+      // 방법 2: contenteditable 기반 에디터 + 이벤트 트리거
       if (!bodyInserted) {
         const editableSelectors = [
           '#tinymce',
@@ -501,17 +551,48 @@ export class BacklinkSitesService {
             await editorArea.click();
             await editorArea.evaluate((el, html) => {
               (el as HTMLElement).innerHTML = html;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
             }, body);
             bodyInserted = true;
+            this.logger.log(`contenteditable 에디터로 본문 삽입 (${sel})`);
             break;
           }
         }
       }
 
-      // 방법 3: 텍스트에어리어 (HTML 모드)
+      // 방법 3: HTML 모드 전환 후 텍스트에어리어 사용
       if (!bodyInserted) {
+        // CKEditor HTML 소스 모드 전환 시도
+        const switchedToSource = await page.evaluate(() => {
+          try {
+            const ck = (window as any).CKEDITOR;
+            if (ck && ck.instances) {
+              const keys = Object.keys(ck.instances);
+              if (keys.length > 0) {
+                ck.instances[keys[0]].setMode('source');
+                return true;
+              }
+            }
+          } catch { /* ignore */ }
+          // HTML 모드 전환 버튼 클릭 시도
+          const htmlBtn = document.querySelector<HTMLElement>(
+            '.btn_html, [data-mode="html"], .cke_button__source',
+          );
+          if (htmlBtn) {
+            htmlBtn.click();
+            return true;
+          }
+          return false;
+        });
+
+        if (switchedToSource) {
+          await page.waitForTimeout(1000);
+        }
+
         const textareaSelectors = [
           'textarea#content',
+          'textarea.cke_source',
           'textarea.editor-textarea',
           'textarea[name="content"]',
           'textarea',
@@ -521,20 +602,37 @@ export class BacklinkSitesService {
           if (textarea) {
             await textarea.fill(body);
             bodyInserted = true;
+            this.logger.log(`textarea로 본문 삽입 (${sel})`);
             break;
           }
+        }
+
+        // 다시 WYSIWYG 모드로 복귀
+        if (bodyInserted && switchedToSource) {
+          await page.evaluate(() => {
+            try {
+              const ck = (window as any).CKEDITOR;
+              if (ck && ck.instances) {
+                const keys = Object.keys(ck.instances);
+                if (keys.length > 0) {
+                  ck.instances[keys[0]].setMode('wysiwyg');
+                }
+              }
+            } catch { /* ignore */ }
+          });
+          await page.waitForTimeout(1000);
         }
       }
 
       if (!bodyInserted) {
-        // 디버깅을 위해 현재 페이지 URL과 주요 요소 정보를 포함
         const debugInfo = await page.evaluate(() => {
           const iframes = document.querySelectorAll('iframe');
           const editables = document.querySelectorAll(
             '[contenteditable="true"]',
           );
           const textareas = document.querySelectorAll('textarea');
-          return `URL: ${location.href}, iframes: ${iframes.length}, contenteditable: ${editables.length}, textareas: ${textareas.length}`;
+          const hasCK = typeof (window as any).CKEDITOR !== 'undefined';
+          return `URL: ${location.href}, CKEditor: ${hasCK}, iframes: ${iframes.length}, contenteditable: ${editables.length}, textareas: ${textareas.length}`;
         });
         return {
           success: false,
@@ -594,9 +692,33 @@ export class BacklinkSitesService {
         sessionCookies: JSON.stringify(finalCookies),
       });
 
-      // 8. 발행된 URL 수집
+      // 8. 발행 결과 검증
       const publishedUrl = page.url();
 
+      // 글쓰기 페이지에 여전히 머물러 있으면 발행 실패로 판단
+      if (
+        publishedUrl.includes('/manage/newpost') ||
+        publishedUrl.includes('accounts.kakao.com') ||
+        publishedUrl.includes('tistory.com/auth/login')
+      ) {
+        // 페이지 내 에러 메시지 수집 시도
+        const pageError = await page.evaluate(() => {
+          const errorEl = document.querySelector(
+            '.error-message, .alert-error, .txt_error, .layer_alert',
+          );
+          return errorEl?.textContent?.trim() || null;
+        });
+        return {
+          success: false,
+          error: pageError
+            ? `발행 실패: ${pageError}`
+            : `발행이 완료되지 않았습니다. 현재 URL: ${publishedUrl}`,
+        };
+      }
+
+      this.logger.log(
+        `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
+      );
       return { success: true, publishedUrl };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
