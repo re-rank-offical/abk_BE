@@ -642,42 +642,126 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // 6. 발행 버튼 클릭
-      const publishSelectors = [
+      // 6. 발행 설정 레이어 열기
+      const publishLayerSelectors = [
         '#publish-layer-btn',
         'button.btn_publish',
         '.btn_save',
         'button[data-name="publish"]',
         'button.publish',
       ];
-      let publishBtn = null;
-      for (const sel of publishSelectors) {
-        publishBtn = await page.$(sel);
-        if (publishBtn) break;
+      let publishLayerBtn = null;
+      for (const sel of publishLayerSelectors) {
+        publishLayerBtn = await page.$(sel);
+        if (publishLayerBtn) {
+          this.logger.log(`발행 레이어 버튼 발견: ${sel}`);
+          break;
+        }
       }
       // 텍스트 기반 폴백
-      if (!publishBtn) {
-        publishBtn = await page.$(
+      if (!publishLayerBtn) {
+        publishLayerBtn = await page.$(
           'xpath=//button[contains(text(), "발행") or contains(text(), "완료") or contains(text(), "저장")]',
         );
       }
-      if (publishBtn) {
-        await publishBtn.click();
+      if (publishLayerBtn) {
+        await publishLayerBtn.click();
         await page.waitForTimeout(2000);
 
-        // 발행 확인 레이어가 뜨는 경우 (공개 발행 확인 버튼)
+        // 7. 공개 설정 - "공개"로 명시적 선택
+        // 티스토리 발행 레이어에서 공개/보호/비공개 옵션 중 "공개" 선택
+        const publicOptionSelectors = [
+          '#open-lbl',                                    // 공개 라벨 (for radio)
+          'label[for="open"]',                            // 공개 라벨
+          'input#open',                                   // 공개 라디오 버튼
+          'input[name="visibility"][value="20"]',         // 공개=20
+          'input[name="visibility"][value="0"]',          // 공개=0
+        ];
+        let publicSelected = false;
+        for (const sel of publicOptionSelectors) {
+          const publicOpt = await page.$(sel);
+          if (publicOpt) {
+            await publicOpt.click();
+            publicSelected = true;
+            this.logger.log(`공개 옵션 선택됨: ${sel}`);
+            break;
+          }
+        }
+        // 텍스트 기반 폴백 - "공개" 텍스트가 포함된 라벨/버튼 클릭
+        if (!publicSelected) {
+          const textFallback = await page.$(
+            'xpath=//label[contains(text(), "공개")] | //span[contains(text(), "공개")]/ancestor::label[1] | //button[contains(text(), "공개")]',
+          );
+          if (textFallback) {
+            await textFallback.click();
+            publicSelected = true;
+            this.logger.log('공개 옵션 텍스트 폴백으로 선택됨');
+          }
+        }
+        // JavaScript로 직접 공개 설정 시도
+        if (!publicSelected) {
+          publicSelected = await page.evaluate(() => {
+            // 라디오 버튼들 중 공개 옵션 찾기
+            const radios = document.querySelectorAll<HTMLInputElement>(
+              'input[type="radio"][name="visibility"], input[type="radio"][name="openType"]',
+            );
+            for (const radio of radios) {
+              const label = radio.closest('label') || document.querySelector(`label[for="${radio.id}"]`);
+              const labelText = label?.textContent || '';
+              if (labelText.includes('공개') && !labelText.includes('비공개')) {
+                radio.checked = true;
+                radio.dispatchEvent(new Event('change', { bubbles: true }));
+                radio.click();
+                return true;
+              }
+            }
+            return false;
+          });
+          if (publicSelected) {
+            this.logger.log('공개 옵션 JS evaluate로 선택됨');
+          }
+        }
+        if (!publicSelected) {
+          this.logger.warn('공개 옵션을 찾지 못함 - 기본값으로 발행 시도');
+        }
+
+        await page.waitForTimeout(1000);
+
+        // 8. 최종 발행 버튼 클릭 (발행 레이어 내 확인 버튼)
         const confirmSelectors = [
           '#publish-btn',
           '.btn_ok',
           'button.btn_default',
+          'button.btn_confirm',
         ];
+        let confirmClicked = false;
         for (const sel of confirmSelectors) {
           const confirmBtn = await page.$(sel);
           if (confirmBtn) {
             await confirmBtn.click();
+            confirmClicked = true;
+            this.logger.log(`발행 확인 버튼 클릭: ${sel}`);
             await page.waitForTimeout(5000);
             break;
           }
+        }
+        // 텍스트 기반 폴백
+        if (!confirmClicked) {
+          const textConfirm = await page.$(
+            'xpath=//button[text()="발행" or text()="발행하기" or text()="확인"]',
+          );
+          if (textConfirm) {
+            await textConfirm.click();
+            confirmClicked = true;
+            this.logger.log('발행 확인 버튼 텍스트 폴백으로 클릭');
+            await page.waitForTimeout(5000);
+          }
+        }
+        if (!confirmClicked) {
+          return {
+            success: false,
+            error: '티스토리 발행 확인 버튼을 찾을 수 없습니다.',
+          };
         }
       } else {
         return {
@@ -686,13 +770,13 @@ export class BacklinkSitesService {
         };
       }
 
-      // 7. 발행 후 쿠키 저장
+      // 9. 발행 후 쿠키 저장
       const finalCookies = await context.cookies();
       await this.siteRepository.update(site.id, {
         sessionCookies: JSON.stringify(finalCookies),
       });
 
-      // 8. 발행 결과 검증
+      // 10. 발행 결과 검증
       const publishedUrl = page.url();
 
       // 글쓰기 페이지에 여전히 머물러 있으면 발행 실패로 판단
