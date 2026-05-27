@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { Browser, BrowserContext } from 'playwright-core';
+import { Browser, BrowserContext, chromium } from 'playwright-core';
 
 import {
   AuthoritySite,
@@ -355,12 +355,21 @@ export class BacklinkSitesService {
     let context: BrowserContext | null = null;
 
     try {
-      browser = await this.createBrowser();
-      context = await browser.newContext({
-        viewport: { width: 1280, height: 900 },
-        locale: 'ko-KR',
-        timezoneId: 'Asia/Seoul',
-      });
+      // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 BrightData Scraping Browser 사용
+      const isRemoteBrowser = !!process.env.BRIGHTDATA_SBR_WS_ENDPOINT;
+      browser = await this.createBrowser({ useScrapingBrowser: true });
+
+      // CDP 연결(Scraping Browser)은 기본 컨텍스트 사용, 로컬은 새 컨텍스트 생성
+      if (isRemoteBrowser && browser.contexts().length > 0) {
+        context = browser.contexts()[0];
+        this.logger.log('Scraping Browser 기본 컨텍스트 사용');
+      } else {
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          locale: 'ko-KR',
+          timezoneId: 'Asia/Seoul',
+        });
+      }
 
       // 1. 세션 쿠키 복원
       if (site.sessionCookies) {
@@ -372,7 +381,7 @@ export class BacklinkSitesService {
         }
       }
 
-      const page = await context.newPage();
+      const page = context.pages()[0] || (await context.newPage());
 
       // 다이얼로그(confirm/alert) 자동 수락 – 임시저장 복구 팝업 등 차단 방지
       page.on('dialog', async (dialog) => {
@@ -763,39 +772,25 @@ export class BacklinkSitesService {
       }
       await page.waitForTimeout(1000);
 
-      // 6-3. "비공개" 라디오 선택 (dkaptcha CAPTCHA 회피: 비공개 발행은 CAPTCHA 미적용 가능성)
-      const privateSelected = await page.evaluate(() => {
+      // 6-3. "공개" 라디오 선택 (Residential Proxy 사용 시 CAPTCHA 미발생 예상)
+      const publicSelected = await page.evaluate(() => {
         const radios = document.querySelectorAll<HTMLInputElement>(
           'input[type="radio"]',
         );
-        // "비공개" 라디오 찾기
         for (const radio of radios) {
           const container = radio.closest('div, span, label, li');
           const text = container?.textContent?.trim() || '';
-          if (text === '비공개') {
+          if (text === '공개') {
             radio.click();
-            return 'exact';
+            return true;
           }
         }
-        for (const radio of radios) {
-          const container = radio.closest('div, span, label, li');
-          const text = container?.textContent?.trim() || '';
-          if (text.includes('비공개')) {
-            radio.click();
-            return 'partial';
-          }
-        }
-        return null;
+        return false;
       });
-      if (privateSelected) {
-        this.logger.log(`비공개 라디오 선택됨 (match: ${privateSelected})`);
-      } else {
-        this.logger.warn('비공개 라디오를 찾을 수 없음, 공개로 시도');
-      }
+      this.logger.log(`공개 라디오 선택: ${publicSelected}`);
       await page.waitForTimeout(1000);
 
-      // 6-4. 발행/저장 버튼 클릭
-      // 비공개 선택 시 버튼이 "발행"이 아닌 "저장" 등으로 변경될 수 있음
+      // 6-4. 발행 버튼 클릭
       const visibleButtons = await page.evaluate(() => {
         return Array.from(document.querySelectorAll('button'))
           .filter((b) => (b as HTMLElement).offsetParent !== null)
@@ -809,7 +804,7 @@ export class BacklinkSitesService {
           (b) => (b as HTMLElement).offsetParent !== null,
         );
 
-        // 1순위: "비공개 발행" 또는 "공개 발행"
+        // "공개 발행" 또는 "발행" 버튼
         for (const btn of buttons) {
           const text = btn.textContent?.trim() || '';
           if (text.includes('발행') && !btn.disabled) {
@@ -817,7 +812,7 @@ export class BacklinkSitesService {
             return text;
           }
         }
-        // 2순위: "비공개 저장" 또는 "저장" (비공개 모드에서 버튼 텍스트 변경 가능)
+        // 폴백: "저장"/"등록" 버튼
         for (const btn of buttons) {
           const text = btn.textContent?.trim() || '';
           if (
@@ -888,110 +883,6 @@ export class BacklinkSitesService {
       this.logger.log(`발행 후 URL: ${publishedUrl}`);
 
       if (publishSuccess || !publishedUrl.includes('/manage/newpost')) {
-        // 비공개로 발행했으면 공개로 전환 시도
-        if (privateSelected) {
-          this.logger.log('비공개 발행 성공 – 공개 전환 시도...');
-          try {
-            // 발행된 글의 수정 페이지에서 공개 전환
-            // publishedUrl이 글 URL이면 /manage/edit/{id} 로 이동
-            const postIdMatch = publishedUrl.match(/\/(\d+)(?:\?|$)/);
-            if (postIdMatch) {
-              const postId = postIdMatch[1];
-              const editUrl = `${site.siteUrl.replace(/\/$/, '')}/manage/edit/${postId}`;
-              this.logger.log(`공개 전환을 위한 수정 페이지: ${editUrl}`);
-
-              await page.goto(editUrl, {
-                waitUntil: 'domcontentloaded',
-                timeout: 15000,
-              });
-              await page.waitForTimeout(2000);
-
-              // "완료" 버튼 클릭
-              await page.evaluate(() => {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                  if (
-                    btn.textContent?.trim() === '완료' &&
-                    (btn as HTMLElement).offsetParent !== null
-                  ) {
-                    btn.click();
-                    return;
-                  }
-                }
-              });
-              await page.waitForTimeout(2000);
-
-              // "공개" 라디오 선택
-              await page.evaluate(() => {
-                const radios = document.querySelectorAll<HTMLInputElement>(
-                  'input[type="radio"]',
-                );
-                for (const radio of radios) {
-                  const container = radio.closest('div, span, label, li');
-                  const text = container?.textContent?.trim() || '';
-                  if (text === '공개') {
-                    radio.click();
-                    return;
-                  }
-                }
-              });
-              await page.waitForTimeout(1000);
-
-              // "공개 발행" 클릭
-              await page.evaluate(() => {
-                const buttons = document.querySelectorAll('button');
-                for (const btn of buttons) {
-                  const text = btn.textContent?.trim() || '';
-                  if (
-                    text.includes('공개') &&
-                    text.includes('발행') &&
-                    (btn as HTMLElement).offsetParent !== null
-                  ) {
-                    btn.click();
-                    return;
-                  }
-                }
-              });
-
-              // 공개 전환 결과 대기
-              let publicSuccess = false;
-              for (let j = 0; j < 10; j++) {
-                await page.waitForTimeout(1000);
-                const checkCaptcha = await page.evaluate(() => {
-                  const iframes = document.querySelectorAll('iframe');
-                  for (const f of iframes) {
-                    if (f.src?.includes('dkaptcha')) return true;
-                  }
-                  return false;
-                });
-                if (checkCaptcha) {
-                  this.logger.warn(
-                    '공개 전환 시에도 dkaptcha 감지 – 비공개 상태로 유지',
-                  );
-                  break;
-                }
-                const url = page.url();
-                if (
-                  !url.includes('/manage/edit/') &&
-                  !url.includes('/manage/newpost')
-                ) {
-                  publicSuccess = true;
-                  this.logger.log(`공개 전환 성공: ${url}`);
-                  break;
-                }
-              }
-
-              if (!publicSuccess) {
-                this.logger.warn('공개 전환 실패 – 비공개 상태로 발행 완료');
-              }
-            }
-          } catch (e) {
-            this.logger.warn(
-              `공개 전환 중 오류: ${e instanceof Error ? e.message : String(e)}`,
-            );
-          }
-        }
-
         this.logger.log(
           `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
         );
@@ -1048,9 +939,31 @@ export class BacklinkSitesService {
 
   // ── 유틸리티 ──
 
-  private async createBrowser(): Promise<Browser> {
-    this.logger.log('CloakBrowser 스텔스 브라우저 실행');
+  private async createBrowser(
+    options?: { useScrapingBrowser?: boolean },
+  ): Promise<Browser> {
+    // 1순위: BrightData Scraping Browser (클라우드 브라우저 + 주거용 IP + 자동 CAPTCHA 풀이)
+    if (options?.useScrapingBrowser) {
+      const sbrEndpoint = process.env.BRIGHTDATA_SBR_WS_ENDPOINT;
+      if (sbrEndpoint) {
+        this.logger.log('BrightData Scraping Browser 연결 중...');
+        try {
+          const browser = await chromium.connectOverCDP(sbrEndpoint);
+          this.logger.log('BrightData Scraping Browser 연결 성공');
+          return browser;
+        } catch (err) {
+          this.logger.error(
+            `Scraping Browser 연결 실패: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          this.logger.warn('로컬 CloakBrowser로 폴백');
+        }
+      } else {
+        this.logger.warn('BRIGHTDATA_SBR_WS_ENDPOINT 미설정 – 로컬 브라우저 사용');
+      }
+    }
 
+    // 폴백: 로컬 CloakBrowser
+    this.logger.log('CloakBrowser 스텔스 브라우저 실행');
     try {
       const { launch } = await (Function(
         'return import("cloakbrowser")',
