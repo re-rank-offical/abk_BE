@@ -1,8 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { chromium, Browser, BrowserContext } from 'playwright';
-import * as fs from 'fs';
+import { launch } from 'cloakbrowser';
+import { Browser, BrowserContext } from 'playwright-core';
 
 import {
   AuthoritySite,
@@ -185,9 +185,9 @@ export class BacklinkSitesService {
     try {
       browser = await this.createBrowser();
       context = await browser.newContext({
-        userAgent:
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 900 },
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
       });
 
       // 1. 세션 쿠키 복원
@@ -349,9 +349,9 @@ export class BacklinkSitesService {
     try {
       browser = await this.createBrowser();
       context = await browser.newContext({
-        userAgent:
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 900 },
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
       });
 
       // 1. 세션 쿠키 복원
@@ -365,6 +365,14 @@ export class BacklinkSitesService {
       }
 
       const page = await context.newPage();
+
+      // 다이얼로그(confirm/alert) 자동 수락 – 임시저장 복구 팝업 등 차단 방지
+      page.on('dialog', async (dialog) => {
+        this.logger.log(
+          `다이얼로그 감지: ${dialog.type()} - ${dialog.message()}`,
+        );
+        await dialog.accept();
+      });
 
       // 2. 글쓰기 페이지 이동
       const writeUrl =
@@ -655,87 +663,120 @@ export class BacklinkSitesService {
       await page.waitForTimeout(1000);
 
       // 6. "완료" 버튼 클릭 → 발행 설정 다이얼로그 열기
-      // 티스토리 에디터 하단의 "완료" 버튼이 발행 레이어를 여는 트리거
-      const completeBtn = await page.$(
-        'xpath=//button[normalize-space(text())="완료"]',
-      );
-      if (!completeBtn) {
+      const completeBtnClicked = await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.trim() === '완료' && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!completeBtnClicked) {
+        const btnList = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('button'))
+            .filter((b) => (b as HTMLElement).offsetParent !== null)
+            .map((b) => b.textContent?.trim())
+            .filter(Boolean),
+        );
         return {
           success: false,
-          error: '티스토리 "완료" 버튼을 찾을 수 없습니다.',
+          error: `티스토리 "완료" 버튼을 찾을 수 없습니다. 페이지 버튼: [${btnList.join(', ')}]`,
         };
       }
-      await completeBtn.click();
       this.logger.log('"완료" 버튼 클릭 → 발행 레이어 열기');
-      await page.waitForTimeout(2000);
+
+      // 발행 다이얼로그 렌더링 대기
+      try {
+        await page.waitForFunction(
+          () => document.querySelectorAll('input[type="radio"]').length >= 2,
+          { timeout: 5000 },
+        );
+      } catch {
+        this.logger.warn('발행 다이얼로그 라디오 버튼 대기 타임아웃');
+      }
+      await page.waitForTimeout(1000);
 
       // 7. "공개" 라디오 버튼 선택 (기본값이 "비공개"이므로 반드시 변경)
-      // 발행 다이얼로그 내 radio 버튼: "공개" / "공개(보호)" / "비공개"
-      let publicSelected = false;
-      // 방법 1: role=radio, name="공개" (exact match로 "공개(보호)" 제외)
-      const publicRadio = await page.$(
-        'xpath=//input[@type="radio" and following-sibling::text()[normalize-space()="공개"] and not(following-sibling::text()[contains(.,"보호")])]',
-      );
-      if (publicRadio) {
-        await publicRadio.click();
-        publicSelected = true;
-        this.logger.log('공개 라디오 XPath로 선택');
-      }
-      // 방법 2: 다이얼로그 내 라디오 버튼을 JS로 직접 찾기
-      if (!publicSelected) {
-        publicSelected = await page.evaluate(() => {
-          const dialog = document.querySelector(
-            'dialog, [role="dialog"], .layer_publish, .layer_post',
-          );
-          const root = dialog || document;
-          const radios = root.querySelectorAll<HTMLInputElement>(
-            'input[type="radio"]',
-          );
-          for (const radio of radios) {
-            const parent = radio.parentElement;
-            const text = parent?.textContent?.trim() || '';
-            // "공개"만 정확히 매칭 ("공개(보호)", "비공개" 제외)
-            if (text === '공개') {
-              radio.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        if (publicSelected) this.logger.log('공개 라디오 JS evaluate로 선택');
-      }
-      if (!publicSelected) {
-        this.logger.warn(
-          '공개 옵션을 찾지 못함 - 기본값(비공개)으로 발행될 수 있음',
+      const publicSelected = await page.evaluate(() => {
+        const radios = document.querySelectorAll<HTMLInputElement>(
+          'input[type="radio"]',
         );
+        for (const radio of radios) {
+          // 라디오의 부모/조부모에서 텍스트 확인
+          const container = radio.closest('div, span, label, li');
+          const text = container?.textContent?.trim() || '';
+          // "공개"만 정확히 매칭 ("공개(보호)", "비공개" 제외)
+          if (text === '공개') {
+            radio.click();
+            return 'exact';
+          }
+        }
+        // 폴백: "공개"로 시작하고 "보호"/"비공개"가 아닌 라디오
+        for (const radio of radios) {
+          const container = radio.closest('div, span, label, li');
+          const text = container?.textContent?.trim() || '';
+          if (
+            text.startsWith('공개') &&
+            !text.includes('보호') &&
+            !text.includes('비공개')
+          ) {
+            radio.click();
+            return 'startsWith';
+          }
+        }
+        return null;
+      });
+      if (publicSelected) {
+        this.logger.log(`공개 라디오 선택됨 (match: ${publicSelected})`);
+      } else {
+        this.logger.warn('공개 라디오를 찾지 못함');
       }
 
       await page.waitForTimeout(1000);
 
-      // 8. "공개 발행" 버튼 클릭 (공개 선택 시 버튼 텍스트가 "공개 발행"으로 변경됨)
-      const publishBtn = await page.$(
-        'xpath=//button[normalize-space(text())="공개 발행"]',
-      );
-      if (publishBtn) {
-        await publishBtn.click();
-        this.logger.log('"공개 발행" 버튼 클릭');
-        await page.waitForTimeout(5000);
-      } else {
-        // 폴백: "발행" 텍스트가 포함된 버튼 (비공개 저장 제외)
-        const fallbackBtn = await page.$(
-          'xpath=//button[contains(text(),"발행") and not(contains(text(),"비공개"))]',
-        );
-        if (fallbackBtn) {
-          await fallbackBtn.click();
-          this.logger.log('폴백 발행 버튼 클릭');
-          await page.waitForTimeout(5000);
-        } else {
-          return {
-            success: false,
-            error: '티스토리 "공개 발행" 버튼을 찾을 수 없습니다.',
-          };
+      // 8. "공개 발행" 버튼 클릭
+      const publishResult = await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        // 우선순위 1: 정확히 "공개 발행"
+        for (const btn of buttons) {
+          if (
+            btn.textContent?.trim() === '공개 발행' &&
+            btn.offsetParent !== null
+          ) {
+            btn.click();
+            return '공개 발행';
+          }
         }
+        // 우선순위 2: "발행"을 포함하되 "비공개" 미포함
+        for (const btn of buttons) {
+          const t = btn.textContent?.trim() || '';
+          if (
+            t.includes('발행') &&
+            !t.includes('비공개') &&
+            btn.offsetParent !== null
+          ) {
+            btn.click();
+            return t;
+          }
+        }
+        // 진단: 현재 보이는 버튼 목록 반환
+        const visible = Array.from(buttons)
+          .filter((b) => (b as HTMLElement).offsetParent !== null)
+          .map((b) => b.textContent?.trim())
+          .filter(Boolean);
+        return `NOT_FOUND:[${visible.join('|')}]`;
+      });
+
+      if (publishResult.startsWith('NOT_FOUND:')) {
+        return {
+          success: false,
+          error: `티스토리 "공개 발행" 버튼을 찾을 수 없습니다. 버튼목록: ${publishResult}`,
+        };
       }
+      this.logger.log(`발행 버튼 클릭: "${publishResult}"`);
+      await page.waitForTimeout(5000);
 
       // 9. 발행 후 쿠키 저장
       const finalCookies = await context.cookies();
@@ -794,33 +835,17 @@ export class BacklinkSitesService {
   // ── 유틸리티 ──
 
   private async createBrowser(): Promise<Browser> {
-    // CHROMIUM_PATH 환경변수가 명시적으로 설정된 경우에만 사용
-    // 그 외에는 Playwright 번들 Chromium 사용 (Docker 이미지 호환성 보장)
-    const execPath =
-      process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)
-        ? process.env.CHROMIUM_PATH
-        : undefined;
-
-    this.logger.log(
-      `브라우저 실행: ${execPath ? `executablePath=${execPath}` : 'Playwright 번들 Chromium'}`,
-    );
+    this.logger.log('CloakBrowser 스텔스 브라우저 실행');
 
     try {
-      return await chromium.launch({
+      return (await launch({
         headless: true,
-        executablePath: execPath,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-software-rasterizer',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--no-first-run',
-          '--single-process',
         ],
-      });
+      })) as unknown as Browser;
     } catch (err) {
       this.logger.error(
         `브라우저 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
