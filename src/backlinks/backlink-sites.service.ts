@@ -88,6 +88,15 @@ export class BacklinkSitesService {
     const results: BacklinkPost[] = [];
 
     for (const site of sites) {
+      // 사이트 간 랜덤 딜레이 (CAPTCHA 방지 – 30~60초)
+      if (results.length > 0) {
+        const delay = 30000 + Math.random() * 30000;
+        this.logger.log(
+          `다음 사이트 발행까지 ${Math.round(delay / 1000)}초 대기 (CAPTCHA 방지)`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
       const post = this.postRepository.create({
         authoritySiteId: site.id,
         title,
@@ -661,6 +670,40 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
+      // 네트워크 요청 캡처 (재시도 루프 밖에서 셋업)
+      const capturedRequests: Array<{
+        url: string;
+        method: string;
+        postData: string | null;
+      }> = [];
+      page.on('request', (req) => {
+        if (
+          req.method() === 'POST' ||
+          req.url().includes('/manage/') ||
+          req.url().includes('/api/')
+        ) {
+          capturedRequests.push({
+            url: req.url(),
+            method: req.method(),
+            postData: req.postData()?.substring(0, 500) || null,
+          });
+        }
+      });
+
+      // 6~10. 발행 시도 (CAPTCHA 감지 시 재시도)
+      const maxPublishRetries = 3;
+      for (
+        let publishAttempt = 1;
+        publishAttempt <= maxPublishRetries;
+        publishAttempt++
+      ) {
+        if (publishAttempt > 1) {
+          this.logger.log(
+            `발행 재시도 ${publishAttempt}/${maxPublishRetries}`,
+          );
+        }
+        capturedRequests.length = 0;
+
       // 6. "완료" 버튼 클릭 → 발행 설정 다이얼로그 열기
       const completeBtnClicked = await page.evaluate(() => {
         const buttons = document.querySelectorAll('button');
@@ -735,26 +778,7 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // 8. 네트워크 요청 캡처 + "공개 발행" 버튼 클릭
-      const capturedRequests: Array<{
-        url: string;
-        method: string;
-        postData: string | null;
-      }> = [];
-      page.on('request', (req) => {
-        if (
-          req.method() === 'POST' ||
-          req.url().includes('/manage/') ||
-          req.url().includes('/api/')
-        ) {
-          capturedRequests.push({
-            url: req.url(),
-            method: req.method(),
-            postData: req.postData()?.substring(0, 500) || null,
-          });
-        }
-      });
-
+      // 8. "공개 발행" 버튼 클릭
       const publishResult = await page.evaluate(() => {
         const buttons = document.querySelectorAll('button');
         // 우선순위 1: 정확히 "공개 발행"
@@ -800,6 +824,58 @@ export class BacklinkSitesService {
       this.logger.log(
         `캡처된 요청 (${capturedRequests.length}건): ${JSON.stringify(capturedRequests)}`,
       );
+
+      // 8.5. CAPTCHA 감지 및 재시도
+      const hasCaptcha = await page.evaluate(() => {
+        return !!(
+          document.querySelector('.capcha_layer') ||
+          document.querySelector('iframe[src*="dkaptcha"]') ||
+          document.querySelector('[class*="dkaptcha"]') ||
+          document.querySelector('[id*="dkaptcha"]')
+        );
+      });
+
+      if (hasCaptcha) {
+        this.logger.warn(
+          `CAPTCHA(dkaptcha) 감지 (시도 ${publishAttempt}/${maxPublishRetries})`,
+        );
+
+        // CAPTCHA/발행 레이어 닫기
+        await page.evaluate(() => {
+          const buttons = document.querySelectorAll('button');
+          for (const btn of buttons) {
+            if (
+              btn.textContent?.trim() === '닫기' &&
+              (btn as HTMLElement).offsetParent !== null
+            ) {
+              btn.click();
+              break;
+            }
+          }
+        });
+        await page.waitForTimeout(1000);
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(1000);
+
+        if (publishAttempt < maxPublishRetries) {
+          const retryDelay = 60000 + Math.random() * 60000; // 60~120초
+          this.logger.log(
+            `${Math.round(retryDelay / 1000)}초 후 재시도합니다...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          continue;
+        }
+
+        // 마지막 시도에서도 CAPTCHA → 최종 실패
+        const captchaCookies = await context.cookies();
+        await this.siteRepository.update(site.id, {
+          sessionCookies: JSON.stringify(captchaCookies),
+        });
+        return {
+          success: false,
+          error: `CAPTCHA가 ${maxPublishRetries}회 반복 발생하여 발행에 실패했습니다.`,
+        };
+      }
 
       // 9. 발행 후 쿠키 저장
       const finalCookies = await context.cookies();
@@ -881,6 +957,13 @@ export class BacklinkSitesService {
         `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
       );
       return { success: true, publishedUrl };
+      } // for (publishAttempt) – CAPTCHA 재시도 루프 끝
+
+      // 모든 재시도 소진 (이론적으로 도달하지 않음)
+      return {
+        success: false,
+        error: `발행 재시도 ${maxPublishRetries}회 모두 실패했습니다.`,
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
