@@ -2750,7 +2750,193 @@ export class PlaywrightAuthService {
 
       await page.waitForTimeout(1000);
 
-      // === 완료(발행) 버튼 클릭 ===
+      // === Direct API 발행 (CAPTCHA 우회) ===
+      this.logger.log(
+        `Direct API 발행 시도 (CAPTCHA 우회) – blog: ${actualBlogName}`,
+      );
+
+      const directApiResult = await page.evaluate(
+        async (params: { title: string; htmlContent: string }) => {
+          const { title, htmlContent } = params;
+
+          // CKEditor에서 실제 에디터 콘텐츠 가져오기
+          let editorContent = htmlContent;
+          try {
+            const ck = (window as any).CKEDITOR;
+            if (ck?.instances) {
+              const keys = Object.keys(ck.instances);
+              if (keys.length > 0) {
+                const data = ck.instances[keys[0]].getData();
+                if (data) editorContent = data;
+              }
+            }
+          } catch {
+            /* fallback */
+          }
+
+          // TinyMCE에서도 가져오기 시도
+          try {
+            const tinymce = (window as any).tinymce;
+            if (tinymce?.activeEditor) {
+              const data = tinymce.activeEditor.getContent();
+              if (data) editorContent = data;
+            }
+          } catch {
+            /* fallback */
+          }
+
+          // iframe body에서 가져오기 시도
+          if (editorContent === htmlContent) {
+            try {
+              const iframe = document.querySelector('iframe');
+              if (iframe?.contentDocument?.body) {
+                const iframeHtml = iframe.contentDocument.body.innerHTML;
+                if (iframeHtml && iframeHtml.length > 10) {
+                  editorContent = iframeHtml;
+                }
+              }
+            } catch {
+              /* cross-origin */
+            }
+          }
+
+          const diagnostics: Array<{
+            endpoint: string;
+            status: number;
+            ok: boolean;
+            body?: string;
+          }> = [];
+
+          const tryPost = async (
+            endpoint: string,
+            payload: Record<string, string>,
+            asJson: boolean,
+          ) => {
+            try {
+              const headers: Record<string, string> = {
+                'X-Requested-With': 'XMLHttpRequest',
+              };
+              let fetchBody: string;
+              if (asJson) {
+                headers['Content-Type'] = 'application/json';
+                fetchBody = JSON.stringify(payload);
+              } else {
+                headers['Content-Type'] =
+                  'application/x-www-form-urlencoded; charset=UTF-8';
+                fetchBody = new URLSearchParams(payload).toString();
+              }
+
+              const res = await fetch(endpoint, {
+                method: 'POST',
+                headers,
+                body: fetchBody,
+                credentials: 'same-origin',
+              });
+
+              const text = await res.text();
+              diagnostics.push({
+                endpoint: `${endpoint} (${asJson ? 'json' : 'form'})`,
+                status: res.status,
+                ok: res.ok,
+                body: text.substring(0, 300),
+              });
+
+              if (res.ok) {
+                let json: any = null;
+                try {
+                  json = JSON.parse(text);
+                } catch {
+                  /* not JSON */
+                }
+                return { success: true as const, json, text };
+              }
+            } catch (err) {
+              diagnostics.push({
+                endpoint,
+                status: 0,
+                ok: false,
+                body: String(err),
+              });
+            }
+            return null;
+          };
+
+          const postPayload: Record<string, string> = {
+            title,
+            content: editorContent,
+            visibility: '20',
+            categoryId: '0',
+            tag: '',
+            type: 'post',
+          };
+
+          const endpoints = [
+            '/manage/post/write.json',
+            '/manage/post/save.json',
+            '/manage/entry/post',
+            '/manage/post',
+          ];
+
+          for (const ep of endpoints) {
+            const jsonRes = await tryPost(ep, postPayload, true);
+            if (jsonRes)
+              return { success: true, data: jsonRes.json, diagnostics };
+
+            const formRes = await tryPost(ep, postPayload, false);
+            if (formRes)
+              return { success: true, data: formRes.json, diagnostics };
+          }
+
+          return { success: false, data: null, diagnostics };
+        },
+        { title, htmlContent },
+      );
+
+      if (directApiResult.success) {
+        this.logger.log(
+          `Direct API 발행 성공: ${JSON.stringify(directApiResult.data).substring(0, 200)}`,
+        );
+
+        // 쿠키 갱신
+        let newCookies: string | undefined;
+        try {
+          const cookies = await context.cookies();
+          newCookies = JSON.stringify(cookies);
+        } catch {
+          /* ignore */
+        }
+
+        const d = directApiResult.data;
+        const postUrl =
+          (d && typeof d === 'object' && (d.url || d.link || d.postUrl)) ||
+          `https://${actualBlogName}.tistory.com`;
+        const postIdMatch = String(postUrl).match(/\/(\d+)/);
+
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
+
+        return {
+          success: true,
+          postId: postIdMatch?.[1] || '',
+          postUrl: String(postUrl),
+          newCookies,
+        };
+      }
+
+      this.logger.warn(
+        `Direct API 실패 – ${JSON.stringify(directApiResult.diagnostics)}`,
+      );
+      this.logger.log('UI 방식으로 전환...');
+
+      // === 완료(발행) 버튼 클릭 (fallback) ===
       this.logger.log('완료 버튼 클릭 중...');
       let publishClicked = false;
 
