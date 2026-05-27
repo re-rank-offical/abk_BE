@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { Browser, BrowserContext, chromium } from 'playwright-core';
+import { Browser, BrowserContext } from 'playwright-core';
 
 import {
   AuthoritySite,
@@ -355,21 +355,13 @@ export class BacklinkSitesService {
     let context: BrowserContext | null = null;
 
     try {
-      // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 BrightData Scraping Browser 사용
-      const isRemoteBrowser = !!process.env.BRIGHTDATA_SBR_WS_ENDPOINT;
-      browser = await this.createBrowser({ useScrapingBrowser: true });
-
-      // CDP 연결(Scraping Browser)은 기본 컨텍스트 사용, 로컬은 새 컨텍스트 생성
-      if (isRemoteBrowser && browser.contexts().length > 0) {
-        context = browser.contexts()[0];
-        this.logger.log('Scraping Browser 기본 컨텍스트 사용');
-      } else {
-        context = await browser.newContext({
-          viewport: { width: 1280, height: 900 },
-          locale: 'ko-KR',
-          timezoneId: 'Asia/Seoul',
-        });
-      }
+      // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 Residential Proxy 사용
+      browser = await this.createBrowser({ useResidentialProxy: true });
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
+      });
 
       // 1. 세션 쿠키 복원
       if (site.sessionCookies) {
@@ -940,43 +932,45 @@ export class BacklinkSitesService {
   // ── 유틸리티 ──
 
   private async createBrowser(
-    options?: { useScrapingBrowser?: boolean },
+    options?: { useResidentialProxy?: boolean },
   ): Promise<Browser> {
-    // 1순위: BrightData Scraping Browser (클라우드 브라우저 + 주거용 IP + 자동 CAPTCHA 풀이)
-    if (options?.useScrapingBrowser) {
-      const sbrEndpoint = process.env.BRIGHTDATA_SBR_WS_ENDPOINT;
-      if (sbrEndpoint) {
-        this.logger.log('BrightData Scraping Browser 연결 중...');
-        try {
-          const browser = await chromium.connectOverCDP(sbrEndpoint);
-          this.logger.log('BrightData Scraping Browser 연결 성공');
-          return browser;
-        } catch (err) {
-          this.logger.error(
-            `Scraping Browser 연결 실패: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          this.logger.warn('로컬 CloakBrowser로 폴백');
-        }
-      } else {
-        this.logger.warn('BRIGHTDATA_SBR_WS_ENDPOINT 미설정 – 로컬 브라우저 사용');
-      }
-    }
+    const proxyHost = process.env.BRIGHTDATA_PROXY_HOST;
+    const proxyUser = process.env.BRIGHTDATA_PROXY_USERNAME;
+    const proxyPass = process.env.BRIGHTDATA_PROXY_PASSWORD;
+    const useProxy =
+      options?.useResidentialProxy && proxyHost && proxyUser && proxyPass;
 
-    // 폴백: 로컬 CloakBrowser
-    this.logger.log('CloakBrowser 스텔스 브라우저 실행');
+    this.logger.log(
+      `CloakBrowser 스텔스 브라우저 실행${useProxy ? ' (BrightData Residential Proxy)' : ''}`,
+    );
+
     try {
       const { launch } = await (Function(
         'return import("cloakbrowser")',
       )() as Promise<typeof import('cloakbrowser')>);
 
-      return (await launch({
+      const launchOptions: Record<string, unknown> = {
         headless: true,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
         ],
-      })) as unknown as Browser;
+      };
+
+      if (useProxy) {
+        launchOptions.proxy = {
+          server: `http://${proxyHost}`,
+          username: proxyUser,
+          password: proxyPass,
+        };
+      } else if (options?.useResidentialProxy) {
+        this.logger.warn(
+          'BRIGHTDATA_PROXY_* 환경변수 미설정 – 프록시 없이 실행',
+        );
+      }
+
+      return (await launch(launchOptions)) as unknown as Browser;
     } catch (err) {
       this.logger.error(
         `브라우저 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
