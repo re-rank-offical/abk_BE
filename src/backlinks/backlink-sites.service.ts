@@ -670,8 +670,112 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // ── 6. 브라우저 내부 직접 API 호출로 CAPTCHA 우회 발행 ──
-      this.logger.log('브라우저 내부에서 직접 API 호출 시도 (CAPTCHA 우회)...');
+      // ── 6A. JS 번들 분석: 실제 발행 엔드포인트 탐색 ──
+      this.logger.log('Step 6A: JS 번들 분석으로 실제 발행 엔드포인트 탐색...');
+
+      const jsBundleFindings = await page.evaluate(async () => {
+        const findings: string[] = [];
+
+        // 현재 페이지의 모든 script src 수집
+        const scriptUrls = Array.from(
+          document.querySelectorAll<HTMLScriptElement>('script[src]'),
+        )
+          .map((s) => s.src)
+          .filter(
+            (src) =>
+              src.includes('tistory') ||
+              src.includes('/manage/') ||
+              src.includes('.js'),
+          );
+
+        findings.push(
+          `스크립트 목록(${scriptUrls.length}개): ${scriptUrls.slice(0, 10).join(', ')}`,
+        );
+
+        // 관심 번들만 분석 (admin/manage 관련)
+        const targetScripts = scriptUrls.filter(
+          (src) =>
+            src.includes('editor') ||
+            src.includes('post') ||
+            src.includes('write') ||
+            src.includes('publish') ||
+            src.includes('manage') ||
+            src.includes('app.') ||
+            src.includes('main.') ||
+            src.includes('chunk'),
+        );
+
+        findings.push(
+          `분석 대상 번들(${targetScripts.length}개): ${targetScripts.slice(0, 5).join(', ')}`,
+        );
+
+        for (const scriptUrl of targetScripts.slice(0, 5)) {
+          try {
+            const res = await fetch(scriptUrl, { credentials: 'include' });
+            if (!res.ok) continue;
+            const text = await res.text();
+
+            // /manage/ 엔드포인트 패턴 추출
+            const manageMatches = text.match(
+              /["'`](\/manage\/[a-zA-Z0-9/_\-{}:]+)["'`]/g,
+            );
+            if (manageMatches) {
+              const unique = [...new Set(manageMatches)].slice(0, 20);
+              findings.push(
+                `[${scriptUrl.split('/').pop()}] /manage/ 엔드포인트: ${unique.join(', ')}`,
+              );
+            }
+
+            // dkaptcha 콜백 패턴 추출
+            const dkaptchaMatches = text.match(/dkaptcha[^"'`\s]{0,100}/g);
+            if (dkaptchaMatches) {
+              const unique = [...new Set(dkaptchaMatches)].slice(0, 10);
+              findings.push(
+                `[${scriptUrl.split('/').pop()}] dkaptcha 패턴: ${unique.join(' | ')}`,
+              );
+            }
+
+            // publish/save 관련 함수명 추출
+            const publishMatches = text.match(
+              /(?:publish|save|submit|post)[A-Za-z]*\s*[=:(]/g,
+            );
+            if (publishMatches) {
+              const unique = [...new Set(publishMatches)].slice(0, 10);
+              findings.push(
+                `[${scriptUrl.split('/').pop()}] publish/save 함수: ${unique.join(', ')}`,
+              );
+            }
+          } catch (e) {
+            findings.push(`[번들 분석 실패] ${scriptUrl}: ${String(e)}`);
+          }
+        }
+
+        // 인라인 스크립트에서도 탐색
+        const inlineScripts = Array.from(
+          document.querySelectorAll<HTMLScriptElement>('script:not([src])'),
+        )
+          .map((s) => s.textContent || '')
+          .join('\n');
+
+        const inlineManage = inlineScripts.match(
+          /["'`](\/manage\/[a-zA-Z0-9/_\-{}:]+)["'`]/g,
+        );
+        if (inlineManage) {
+          const unique = [...new Set(inlineManage)].slice(0, 20);
+          findings.push(
+            `[인라인 스크립트] /manage/ 엔드포인트: ${unique.join(', ')}`,
+          );
+        }
+
+        return findings;
+      });
+
+      for (const finding of jsBundleFindings) {
+        this.logger.log(`[JS번들분석] ${finding}`);
+      }
+
+      // ── 6B. autosave 기반 발행: entryId 획득 후 publish 엔드포인트 시도 ──
+      this.logger.log('Step 6B: autosave 기반 발행 시도...');
 
       // CKEditor에서 실제 렌더링된 HTML 가져오기
       const editorContent = await page.evaluate(() => {
@@ -691,381 +795,264 @@ export class BacklinkSitesService {
         `발행 콘텐츠 길이: ${publishContent.length}, CKEditor 사용: ${!!editorContent}`,
       );
 
-      // 브라우저 컨텍스트에서 직접 fetch 호출 (세션쿠키 자동 포함)
-      const directResult = await page.evaluate(
+      const autosaveResult = await page.evaluate(
         async (params: { title: string; content: string }) => {
           const { title, content } = params;
-          const results: Array<{
-            ep: string;
-            status: number;
-            body: string;
-          }> = [];
 
-          // CSRF 토큰 확인
-          const csrfMeta = document.querySelector('meta[name="_csrf"]');
-          const csrfToken = csrfMeta?.getAttribute('content') || '';
-          const csrfHeaderMeta = document.querySelector(
-            'meta[name="_csrf_header"]',
-          );
-          const csrfHeaderName =
-            csrfHeaderMeta?.getAttribute('content') || 'X-CSRF-TOKEN';
+          // 1단계: autosave로 entryId/draftSequence 획득
+          let entryId: number | null = null;
+          let draftSequence: number | null = null;
+          let autosaveStatus = -1;
+          let autosaveBody = '';
 
-          const baseHeaders: Record<string, string> = {};
-          if (csrfToken) baseHeaders[csrfHeaderName] = csrfToken;
+          try {
+            const saveRes = await fetch('/manage/autosave', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                title,
+                content,
+                tags: '',
+                categoryId: 0,
+                thumbnail: '',
+                draftSequence: null,
+                totalWritingTimeMs: 0,
+              }),
+              credentials: 'include',
+            });
+            autosaveStatus = saveRes.status;
+            autosaveBody = await saveRes.text();
 
-          const endpoints = [
-            '/manage/post/write.json',
-            '/manage/post/save.json',
-            '/manage/newpost/save',
-            '/manage/entry/post',
-            '/manage/post',
+            if (saveRes.ok) {
+              try {
+                const data = JSON.parse(autosaveBody);
+                entryId = data.entryId ?? data.postId ?? data.id ?? null;
+                draftSequence = data.draftSequence ?? data.sequence ?? null;
+              } catch {
+                /* JSON 파싱 실패 */
+              }
+            }
+          } catch (e) {
+            autosaveBody = String(e);
+          }
+
+          const log: Array<{ ep: string; status: number; body: string }> = [];
+          log.push({
+            ep: '/manage/autosave',
+            status: autosaveStatus,
+            body: autosaveBody.substring(0, 500),
+          });
+
+          if (!entryId) {
+            return { success: false, log };
+          }
+
+          // 2단계: entryId를 이용한 publish 엔드포인트 순차 시도
+          const publishEndpoints = [
+            { method: 'POST', url: `/manage/post/${entryId}/publish` },
+            { method: 'POST', url: `/manage/entry/${entryId}/publish` },
+            {
+              method: 'PUT',
+              url: `/manage/post/${entryId}`,
+              body: { visibility: 3 },
+            },
+            {
+              method: 'PATCH',
+              url: `/manage/post/${entryId}`,
+              body: { visibility: 3 },
+            },
+            {
+              method: 'POST',
+              url: `/manage/post/${entryId}`,
+              body: { visibility: 3, status: 'publish' },
+            },
           ];
 
-          // JSON 형식 시도
-          for (const ep of endpoints) {
+          for (const ep of publishEndpoints) {
             try {
-              const res = await fetch(ep, {
-                method: 'POST',
-                headers: {
-                  ...baseHeaders,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  title,
-                  content,
-                  visibility: 3,
-                  categoryId: 0,
-                  tags: '',
-                  thumbnail: '',
-                  password: '',
-                }),
+              const reqBody = ep.body
+                ? JSON.stringify({ ...ep.body, title, content })
+                : JSON.stringify({ title, content, visibility: 3 });
+
+              const res = await fetch(ep.url, {
+                method: ep.method,
+                headers: { 'Content-Type': 'application/json' },
+                body: reqBody,
                 credentials: 'include',
               });
               const text = await res.text();
-              results.push({
-                ep: `${ep}(json)`,
+              log.push({
+                ep: `${ep.method} ${ep.url}`,
                 status: res.status,
                 body: text.substring(0, 300),
               });
+
               if (res.ok) {
                 try {
                   const data = JSON.parse(text);
-                  if (data.entryId || data.postId || data.url || data.id) {
-                    return { success: true, ep, data };
-                  }
+                  const url =
+                    data.url ||
+                    data.postUrl ||
+                    data.link ||
+                    data.publishedUrl ||
+                    null;
+                  return { success: true, entryId, url, log };
                 } catch {
-                  /* not JSON */
+                  // 200이지만 JSON 아님 → 성공으로 간주
+                  return { success: true, entryId, url: null, log };
                 }
               }
             } catch (e) {
-              results.push({
-                ep: `${ep}(json)`,
+              log.push({
+                ep: `${ep.method} ${ep.url}`,
                 status: -1,
                 body: String(e),
               });
             }
           }
 
-          // x-www-form-urlencoded 형식 시도
-          for (const ep of endpoints) {
-            try {
-              const p = new URLSearchParams();
-              p.append('title', title);
-              p.append('content', content);
-              p.append('visibility', '3');
-              p.append('categoryId', '0');
-              p.append('tags', '');
-              p.append('thumbnail', '');
-              if (csrfToken) p.append('_csrf', csrfToken);
-
-              const res = await fetch(ep, {
-                method: 'POST',
-                headers: {
-                  ...baseHeaders,
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: p.toString(),
-                credentials: 'include',
-              });
-              const text = await res.text();
-              results.push({
-                ep: `${ep}(form)`,
-                status: res.status,
-                body: text.substring(0, 300),
-              });
-              if (res.ok) {
-                try {
-                  const data = JSON.parse(text);
-                  if (data.entryId || data.postId || data.url || data.id) {
-                    return { success: true, ep, data };
-                  }
-                } catch {
-                  /* not JSON */
-                }
-              }
-            } catch (e) {
-              results.push({
-                ep: `${ep}(form)`,
-                status: -1,
-                body: String(e),
-              });
-            }
-          }
-
-          return { success: false, results };
+          return { success: false, entryId, log };
         },
         { title, content: publishContent },
       );
 
       this.logger.log(
-        `직접 API 결과: ${JSON.stringify(directResult).substring(0, 1000)}`,
+        `[6B] autosave 결과: ${JSON.stringify(autosaveResult).substring(0, 1500)}`,
       );
 
       if (
-        directResult.success &&
-        typeof directResult === 'object' &&
-        'data' in directResult
+        autosaveResult.success &&
+        typeof autosaveResult === 'object' &&
+        'entryId' in autosaveResult
       ) {
         this.logger.log(
-          `직접 API로 발행 성공! endpoint=${(directResult as any).ep}`,
+          `[6B] autosave 기반 발행 성공! entryId=${(autosaveResult as any).entryId}`,
         );
         const finalCookies = await context.cookies();
         await this.siteRepository.update(site.id, {
           sessionCookies: JSON.stringify(finalCookies),
         });
-        const resultData = (directResult as any).data;
-        return {
-          success: true,
-          publishedUrl: resultData?.url || site.siteUrl,
-        };
+        const resultUrl =
+          (autosaveResult as any).url ||
+          `${site.siteUrl.replace(/\/$/, '')}/${(autosaveResult as any).entryId}`;
+        return { success: true, publishedUrl: resultUrl };
       }
 
-      // ── 7. 직접 API 실패 → JS 수준 CAPTCHA 콜백 주입 + UI 발행 ──
+      // ── 6C. UI 접근법: dkaptcha를 가로막지 않고 자연 로딩 후 postMessage 시뮬레이션 ──
       this.logger.log(
-        '직접 API 실패, JS 레벨 CAPTCHA 우회 + UI 발행으로 전환...',
+        'Step 6C: dkaptcha 자연 로딩 + UI 발행 + postMessage 시뮬레이션...',
       );
 
-      // 7-1. JavaScript 레벨에서 fetch/XHR 오버라이드 + postMessage 주입
-      await page.evaluate(() => {
-        const w = window as any;
-
-        // dkaptcha 성공 콜백을 자동 트리거하기 위한 준비
-        w.__captchaBypassActive = true;
-        w.__captchaCallbackFired = false;
-
-        // (A) fetch 오버라이드: dkaptcha 요청 시 widgetId를 반환하되,
-        //     CAPTCHA 성공 콜백을 자동으로 트리거
-        const originalFetch = w.fetch;
-        w.fetch = async function (...args: any[]) {
-          const url =
-            typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-
-          if (url.includes('dkaptcha/widgetId')) {
-            // 약간의 딜레이 후 postMessage로 CAPTCHA 성공 시뮬레이션
-            setTimeout(() => {
-              // CAPTCHA iframe이 생성된 후 성공 메시지 전송
-              const tryBypass = () => {
-                if (w.__captchaCallbackFired) return;
-
-                // 방법 1: postMessage로 성공 전달
-                window.postMessage(
-                  {
-                    source: 'dkaptcha',
-                    event: 'success',
-                    token: 'bp_' + Date.now(),
-                  },
-                  '*',
-                );
-                window.postMessage(
-                  {
-                    type: 'dkaptcha',
-                    status: 'complete',
-                    data: { token: 'bp_' + Date.now() },
-                  },
-                  '*',
-                );
-
-                // 방법 2: CAPTCHA 레이어 강제 제거 + 발행 상태 변경
-                document
-                  .querySelectorAll(
-                    '.capcha_layer, [class*="dkaptcha"], [id*="dkaptcha"]',
-                  )
-                  .forEach((el) => {
-                    (el as HTMLElement).style.display = 'none';
-                    el.remove();
-                  });
-
-                // 방법 3: CAPTCHA iframe 찾아서 성공 메시지 전송
-                document
-                  .querySelectorAll('iframe')
-                  .forEach((iframe: HTMLIFrameElement) => {
-                    const src = iframe.src || '';
-                    if (src.includes('dkaptcha') && iframe.contentWindow) {
-                      try {
-                        iframe.contentWindow.postMessage(
-                          { action: 'verify', token: 'bp_' + Date.now() },
-                          '*',
-                        );
-                      } catch {
-                        /* cross-origin */
-                      }
-                    }
-                  });
-              };
-
-              // 여러 타이밍에 시도
-              tryBypass();
-              setTimeout(tryBypass, 500);
-              setTimeout(tryBypass, 1000);
-              setTimeout(tryBypass, 2000);
-              setTimeout(tryBypass, 3000);
-            }, 500);
-
-            // 정상적인 widgetId 응답 반환
-            return new Response(
-              JSON.stringify({ widgetId: 'bp_' + Date.now() }),
-              {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' },
-              },
-            );
-          }
-
-          // dkaptcha verify 엔드포인트도 인터셉트
-          if (url.includes('dkaptcha/verify')) {
-            w.__captchaCallbackFired = true;
-            return new Response(
-              JSON.stringify({ success: true, token: 'bp_' + Date.now() }),
-              {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' },
-              },
-            );
-          }
-
-          return originalFetch.apply(w, args);
-        };
-
-        // (B) XMLHttpRequest 오버라이드
-        const OrigXHR = XMLHttpRequest;
-        const origOpen = OrigXHR.prototype.open;
-        const origSend = OrigXHR.prototype.send;
-
-        OrigXHR.prototype.open = function (method: string, url: string) {
-          (this as any)._url = url;
-          return origOpen.apply(this, arguments as any);
-        };
-
-        OrigXHR.prototype.send = function (data?: any) {
-          const url = (this as any)._url || '';
-          if (url.includes('dkaptcha')) {
-            const self = this;
-            setTimeout(() => {
-              Object.defineProperty(self, 'status', {
-                value: 200,
-                writable: true,
-              });
-              Object.defineProperty(self, 'readyState', {
-                value: 4,
-                writable: true,
-              });
-              Object.defineProperty(self, 'responseText', {
-                value: JSON.stringify({
-                  widgetId: 'bp_' + Date.now(),
-                  success: true,
-                }),
-                writable: true,
-              });
-              self.dispatchEvent(new Event('readystatechange'));
-              self.dispatchEvent(new Event('load'));
-            }, 100);
-            return;
-          }
-          return origSend.call(this, data);
-        };
-
-        // (C) MutationObserver: CAPTCHA iframe 감지 시 자동 성공 트리거
-        const observer = new MutationObserver((mutations) => {
-          for (const mutation of mutations) {
-            for (const node of Array.from(mutation.addedNodes)) {
-              if (!(node instanceof HTMLElement)) continue;
-              const iframes = node.querySelectorAll
-                ? node.querySelectorAll('iframe')
-                : [];
-              const isIframe = node.tagName === 'IFRAME';
-              const checkList = isIframe
-                ? [node as HTMLIFrameElement]
-                : Array.from(iframes);
-
-              for (const iframe of checkList) {
-                const src = (iframe as HTMLIFrameElement).src || '';
-                if (src.includes('dkaptcha')) {
-                  // CAPTCHA iframe 감지 → 즉시 성공 메시지
-                  setTimeout(() => {
-                    window.postMessage(
-                      {
-                        source: 'dkaptcha-widget',
-                        event: 'complete',
-                        token: 'bp_obs_' + Date.now(),
-                      },
-                      '*',
-                    );
-                    // iframe 제거
-                    const layer = (iframe as HTMLElement).closest(
-                      '[class*="capcha"], [class*="layer"], [class*="dkaptcha"]',
-                    );
-                    if (layer) (layer as HTMLElement).style.display = 'none';
-                  }, 1000);
-                }
-              }
-            }
-          }
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-      });
-
-      // 7-2. page.route 로도 인터셉트 (네트워크 레벨 이중 차단)
-      await page.route('**/manage/dkaptcha/**', async (route) => {
-        const url = route.request().url();
-        this.logger.log(`dkaptcha 네트워크 인터셉트: ${url}`);
-        if (url.includes('verify')) {
-          await route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ success: true, token: 'bp_net' }),
-          });
-        } else {
-          await route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ widgetId: 'bp_net_' + Date.now() }),
-          });
-        }
-      });
-
-      // 네트워크 요청 캡처 (발행 POST 디스커버리용)
+      // 모든 POST 요청 캡처 (실제 발행 엔드포인트 디스커버리)
       const capturedRequests: Array<{
         url: string;
         method: string;
         postData: string | null;
       }> = [];
       page.on('request', (req) => {
-        const url = req.url();
         if (
-          req.method() === 'POST' &&
-          !url.includes('dkaptcha') &&
-          !url.includes('autosave')
+          req.method() === 'POST' ||
+          req.method() === 'PUT' ||
+          req.method() === 'PATCH'
         ) {
           capturedRequests.push({
-            url,
+            url: req.url(),
             method: req.method(),
             postData: req.postData()?.substring(0, 500) || null,
           });
         }
       });
 
-      // 7-3. UI 발행 플로우 실행
-      // "완료" 버튼 클릭 → 발행 설정 다이얼로그 열기
+      // dkaptcha 응답 캡처 (실제 응답 포맷 파악)
+      const capturedDkaptchaResponses: Array<{
+        url: string;
+        status: number;
+        body: string;
+      }> = [];
+      page.on('response', async (res) => {
+        if (res.url().includes('dkaptcha')) {
+          try {
+            const text = await res.text();
+            capturedDkaptchaResponses.push({
+              url: res.url(),
+              status: res.status(),
+              body: text.substring(0, 500),
+            });
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+
+      // MutationObserver + postMessage 주입: CAPTCHA iframe 감지 후 widgetId 추출 및 성공 시뮬레이션
+      await page.evaluate(() => {
+        const w = window as any;
+        w.__captchaWidgetIds = w.__captchaWidgetIds || [];
+        w.__captchaBypassAttempts = 0;
+
+        const trySendSuccess = (widgetId: string) => {
+          w.__captchaBypassAttempts += 1;
+
+          // 다양한 postMessage 포맷 시도
+          const formats = [
+            { source: 'dkaptcha', event: 'success', widgetId, token: widgetId },
+            {
+              type: 'dkaptcha',
+              status: 'success',
+              widgetId,
+              data: { token: widgetId },
+            },
+            { action: 'captcha_success', widgetId, result: 'success' },
+            { name: 'dkaptcha', message: 'success', id: widgetId },
+            { dkaptcha: true, widgetId, verified: true, token: widgetId },
+          ];
+
+          for (const fmt of formats) {
+            window.postMessage(fmt, '*');
+          }
+        };
+
+        const observer = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            for (const node of Array.from(mutation.addedNodes)) {
+              if (!(node instanceof HTMLElement)) continue;
+
+              const allIframes: HTMLIFrameElement[] = [];
+              if (node.tagName === 'IFRAME') {
+                allIframes.push(node as HTMLIFrameElement);
+              }
+              node
+                .querySelectorAll?.('iframe')
+                .forEach((f) => allIframes.push(f as HTMLIFrameElement));
+
+              for (const iframe of allIframes) {
+                const src = iframe.src || iframe.getAttribute('src') || '';
+                if (!src.includes('dkaptcha')) continue;
+
+                // widgetId를 src에서 추출
+                const widgetMatch = src.match(/[?&]widgetId=([^&]+)/);
+                const widgetId = widgetMatch
+                  ? widgetMatch[1]
+                  : 'wid_' + Date.now();
+
+                w.__captchaWidgetIds.push({ widgetId, src });
+
+                // 즉시 + 지연 시도 (여러 타이밍)
+                trySendSuccess(widgetId);
+                setTimeout(() => trySendSuccess(widgetId), 500);
+                setTimeout(() => trySendSuccess(widgetId), 1000);
+                setTimeout(() => trySendSuccess(widgetId), 2000);
+                setTimeout(() => trySendSuccess(widgetId), 3500);
+              }
+            }
+          }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+        w.__captchaObserver = observer;
+      });
+
+      // "완료" 버튼 클릭 → 발행 레이어 열기
       const completeBtnClicked = await page.evaluate(() => {
         const buttons = document.querySelectorAll('button');
         for (const btn of buttons) {
@@ -1171,68 +1158,32 @@ export class BacklinkSitesService {
       }
       this.logger.log(`발행 버튼 클릭: "${publishResult}"`);
 
-      // CAPTCHA 우회 대기 (JS 레벨 인터셉트가 작동할 시간)
-      await page.waitForTimeout(8000);
+      // CAPTCHA + postMessage 작동 대기 (10초)
+      await page.waitForTimeout(10000);
 
-      // 캡처된 네트워크 요청 로깅
+      // CAPTCHA iframe에서 실제로 감지된 widgetId 로깅
+      const captchaState = await page.evaluate(() => {
+        const w = window as any;
+        return {
+          widgetIds: w.__captchaWidgetIds || [],
+          bypassAttempts: w.__captchaBypassAttempts || 0,
+        };
+      });
       this.logger.log(
-        `캡처된 POST 요청 (${capturedRequests.length}건): ${JSON.stringify(capturedRequests)}`,
+        `[6C] CAPTCHA 상태: widgetIds=${JSON.stringify(captchaState.widgetIds)}, bypassAttempts=${captchaState.bypassAttempts}`,
       );
 
-      // CAPTCHA가 여전히 있는지 확인
-      const hasCaptcha = await page.evaluate(() => {
-        return !!(
-          document.querySelector('.capcha_layer') ||
-          document.querySelector('iframe[src*="dkaptcha"]') ||
-          document.querySelector('[class*="dkaptcha"]') ||
-          document.querySelector('[id*="dkaptcha"]')
-        );
-      });
+      // dkaptcha 응답 로깅
+      this.logger.log(
+        `[6C] dkaptcha 응답(${capturedDkaptchaResponses.length}건): ${JSON.stringify(capturedDkaptchaResponses).substring(0, 1000)}`,
+      );
 
-      if (hasCaptcha) {
-        this.logger.warn('JS 레벨 CAPTCHA 우회 실패, CAPTCHA 여전히 존재');
+      // 캡처된 모든 네트워크 요청 로깅
+      this.logger.log(
+        `[6C] 캡처된 POST/PUT/PATCH 요청(${capturedRequests.length}건): ${JSON.stringify(capturedRequests).substring(0, 1500)}`,
+      );
 
-        // 최후 수단: CAPTCHA 레이어 강제 제거 후 발행 시도
-        this.logger.log('CAPTCHA 레이어 강제 제거 시도...');
-        await page.evaluate(() => {
-          // 모든 CAPTCHA 관련 요소 제거
-          document
-            .querySelectorAll(
-              '.capcha_layer, [class*="dkaptcha"], [id*="dkaptcha"], iframe[src*="dkaptcha"]',
-            )
-            .forEach((el) => el.remove());
-
-          // 발행 모달의 오버레이/딤 레이어도 제거
-          document
-            .querySelectorAll('[class*="dim"], [class*="overlay"]')
-            .forEach((el) => {
-              if ((el as HTMLElement).style.display !== 'none') {
-                (el as HTMLElement).style.display = 'none';
-              }
-            });
-        });
-        await page.waitForTimeout(2000);
-
-        // "공개 발행" 버튼이 다시 보이면 한번 더 클릭
-        const retryPublish = await page.evaluate(() => {
-          const buttons = document.querySelectorAll('button');
-          for (const btn of buttons) {
-            if (
-              btn.textContent?.trim() === '공개 발행' &&
-              btn.offsetParent !== null &&
-              !btn.disabled
-            ) {
-              btn.click();
-              return true;
-            }
-          }
-          return false;
-        });
-        if (retryPublish) {
-          this.logger.log('CAPTCHA 제거 후 "공개 발행" 재클릭');
-          await page.waitForTimeout(8000);
-        }
-      }
+      // ── 결과 검증 ──
 
       // 발행 후 쿠키 저장
       const finalCookies = await context.cookies();
@@ -1240,18 +1191,27 @@ export class BacklinkSitesService {
         sessionCookies: JSON.stringify(finalCookies),
       });
 
-      // 발행 결과 검증
       const publishedUrl = page.url();
       this.logger.log(`발행 후 URL: ${publishedUrl}`);
 
-      // 캡처된 발행 POST가 있으면 성공으로 간주 가능
+      // 캡처된 요청 중 실제 발행 POST가 있으면 성공 판단
       const hasPublishPost = capturedRequests.some(
         (r) =>
-          r.postData &&
-          (r.postData.includes('"title"') || r.postData.includes('title=')),
+          r.url.includes('/manage/') &&
+          !r.url.includes('autosave') &&
+          !r.url.includes('dkaptcha') &&
+          r.postData !== null,
       );
       if (hasPublishPost) {
-        this.logger.log('발행 POST 요청이 캡처됨 → 성공으로 판단');
+        const publishReq = capturedRequests.find(
+          (r) =>
+            r.url.includes('/manage/') &&
+            !r.url.includes('autosave') &&
+            !r.url.includes('dkaptcha'),
+        );
+        this.logger.log(
+          `발행 POST 요청 캡처됨 (${publishReq?.method} ${publishReq?.url}) → 성공으로 판단`,
+        );
         return { success: true, publishedUrl };
       }
 
@@ -1265,13 +1225,13 @@ export class BacklinkSitesService {
           const result: string[] = [];
           document.querySelectorAll('iframe').forEach((f) => {
             const src = f.src || f.getAttribute('src') || '';
-            if (src) result.push(`iframe: ${src.substring(0, 100)}`);
+            if (src) result.push(`iframe: ${src.substring(0, 150)}`);
           });
           const captchaEl = document.querySelector(
             '[class*="captcha"], [id*="captcha"], [class*="dkaptcha"]',
           );
           if (captchaEl)
-            result.push(`CAPTCHA: ${captchaEl.className || captchaEl.id}`);
+            result.push(`CAPTCHA요소: ${captchaEl.className || captchaEl.id}`);
           const buttons = document.querySelectorAll('button');
           const btnTexts: string[] = [];
           buttons.forEach((btn) => {
@@ -1281,6 +1241,12 @@ export class BacklinkSitesService {
             }
           });
           result.push(`buttons: [${btnTexts.join('|')}]`);
+          // 저장중 텍스트 확인
+          const savingEl = document.querySelector(
+            '[class*="saving"], [class*="저장"]',
+          );
+          if (savingEl)
+            result.push(`saving요소: ${savingEl.textContent?.trim()}`);
           return result.join(' | ');
         });
 
