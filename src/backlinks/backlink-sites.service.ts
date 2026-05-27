@@ -539,17 +539,28 @@ export class BacklinkSitesService {
         }
       }
 
-      // 4. 제목 입력 - 티스토리 에디터
+      // 4. 제목 입력 - 티스토리 에디터 (SPA 렌더링 대기)
       const preTitleUrl = page.url();
       this.logger.log(`제목 입력 시도 – URL: ${preTitleUrl}`);
 
+      // SPA가 완전히 렌더링될 때까지 대기 (최대 15초)
       const titleSelectors = [
         '#post-title-inp',
         'input[name="title"]',
         '.tit_post input',
         'input[placeholder*="제목"]',
       ];
+
       let titleInput = null;
+      try {
+        await page.waitForSelector(
+          titleSelectors.join(', '),
+          { timeout: 15000 },
+        );
+      } catch {
+        this.logger.warn('제목 필드 대기 타임아웃 (15초)');
+      }
+
       for (const sel of titleSelectors) {
         titleInput = await page.$(sel);
         if (titleInput) {
