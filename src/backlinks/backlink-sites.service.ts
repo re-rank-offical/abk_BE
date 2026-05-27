@@ -445,6 +445,7 @@ export class BacklinkSitesService {
 
       // 3. 로그인 필요 여부 확인 (카카오 로그인 페이지로 리다이렉트 체크)
       const currentUrl = page.url();
+      this.logger.log(`글쓰기 페이지 이동 후 URL: ${currentUrl}`);
       const needsLogin =
         currentUrl.includes('accounts.kakao.com') ||
         currentUrl.includes('tistory.com/auth/login');
@@ -508,6 +509,9 @@ export class BacklinkSitesService {
       }
 
       // 4. 제목 입력 - 티스토리 에디터
+      const preTitleUrl = page.url();
+      this.logger.log(`제목 입력 시도 – URL: ${preTitleUrl}`);
+
       const titleSelectors = [
         '#post-title-inp',
         'input[name="title"]',
@@ -517,15 +521,29 @@ export class BacklinkSitesService {
       let titleInput = null;
       for (const sel of titleSelectors) {
         titleInput = await page.$(sel);
-        if (titleInput) break;
+        if (titleInput) {
+          this.logger.log(`제목 필드 발견: ${sel}`);
+          break;
+        }
       }
       if (titleInput) {
         await titleInput.click();
         await titleInput.fill(title);
+        this.logger.log('제목 입력 완료');
       } else {
+        // 페이지 상태 진단
+        const diagInfo = await page.evaluate(() => {
+          const inputs = document.querySelectorAll('input');
+          const inputList = Array.from(inputs).map(
+            (i) =>
+              `${i.type}:${i.name || i.id || i.placeholder || 'no-id'}`,
+          );
+          return `URL: ${location.href}, inputs: [${inputList.slice(0, 10).join(', ')}], title: ${document.title}`;
+        });
+        this.logger.error(`제목 필드 미발견. 진단: ${diagInfo}`);
         return {
           success: false,
-          error: '티스토리 제목 입력 필드를 찾을 수 없습니다.',
+          error: `티스토리 제목 입력 필드를 찾을 수 없습니다. (${diagInfo})`,
         };
       }
 
