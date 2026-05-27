@@ -794,27 +794,37 @@ export class BacklinkSitesService {
       }
       await page.waitForTimeout(1000);
 
-      // 6-4. 발행 버튼 클릭 ("비공개 발행" 또는 "공개 발행")
+      // 6-4. 발행/저장 버튼 클릭
+      // 비공개 선택 시 버튼이 "발행"이 아닌 "저장" 등으로 변경될 수 있음
+      const visibleButtons = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button'))
+          .filter((b) => (b as HTMLElement).offsetParent !== null)
+          .map((b) => b.textContent?.trim() || '')
+          .filter(Boolean);
+      });
+      this.logger.log(`발행 다이얼로그 버튼 목록: [${visibleButtons.join(' | ')}]`);
+
       const publishBtnClicked = await page.evaluate(() => {
-        const buttons = document.querySelectorAll('button');
-        // 비공개 발행 우선 시도
+        const buttons = Array.from(document.querySelectorAll('button')).filter(
+          (b) => (b as HTMLElement).offsetParent !== null,
+        );
+
+        // 1순위: "비공개 발행" 또는 "공개 발행"
         for (const btn of buttons) {
           const text = btn.textContent?.trim() || '';
-          if (
-            text.includes('비공개') &&
-            text.includes('발행') &&
-            (btn as HTMLElement).offsetParent !== null
-          ) {
+          if (text.includes('발행') && !btn.disabled) {
             btn.click();
             return text;
           }
         }
-        // 공개 발행 폴백
+        // 2순위: "비공개 저장" 또는 "저장" (비공개 모드에서 버튼 텍스트 변경 가능)
         for (const btn of buttons) {
           const text = btn.textContent?.trim() || '';
           if (
-            text.includes('발행') &&
-            (btn as HTMLElement).offsetParent !== null
+            (text.includes('저장') || text.includes('등록')) &&
+            !text.includes('저장중') &&
+            !text.includes('임시') &&
+            !btn.disabled
           ) {
             btn.click();
             return text;
@@ -826,7 +836,7 @@ export class BacklinkSitesService {
       if (!publishBtnClicked) {
         return {
           success: false,
-          error: '발행 버튼을 찾을 수 없습니다.',
+          error: `발행 버튼을 찾을 수 없습니다. 버튼: [${visibleButtons.join(', ')}]`,
         };
       }
       this.logger.log(`"${publishBtnClicked}" 버튼 클릭`);
