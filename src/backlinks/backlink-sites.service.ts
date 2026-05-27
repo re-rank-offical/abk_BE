@@ -355,13 +355,13 @@ export class BacklinkSitesService {
     let context: BrowserContext | null = null;
 
     try {
-      // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 Residential Proxy 사용
+      // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 한국 프록시 사용
       browser = await this.createBrowser({ useResidentialProxy: true });
       context = await browser.newContext({
         viewport: { width: 1280, height: 900 },
         locale: 'ko-KR',
         timezoneId: 'Asia/Seoul',
-        ignoreHTTPSErrors: true, // BrightData 프록시 SSL 인증서 허용
+        ignoreHTTPSErrors: true,
       });
 
       // 1. 세션 쿠키 복원
@@ -380,7 +380,9 @@ export class BacklinkSitesService {
       page.on('console', (msg) => {
         const type = msg.type();
         if (type === 'error' || type === 'warning') {
-          this.logger.warn(`[브라우저 ${type}] ${msg.text().substring(0, 200)}`);
+          this.logger.warn(
+            `[브라우저 ${type}] ${msg.text().substring(0, 200)}`,
+          );
         }
       });
 
@@ -489,7 +491,10 @@ export class BacklinkSitesService {
         }
 
         // /manage/ 페이지나 기타 페이지인 경우 → 티스토리 로그인 페이지로 직접 이동
-        if (!currentUrl.includes('accounts.kakao.com') && !currentUrl.includes('tistory.com/auth/login')) {
+        if (
+          !currentUrl.includes('accounts.kakao.com') &&
+          !currentUrl.includes('tistory.com/auth/login')
+        ) {
           this.logger.log('티스토리 로그인 페이지로 직접 이동');
           await page.goto('https://www.tistory.com/auth/login', {
             waitUntil: 'domcontentloaded',
@@ -573,10 +578,9 @@ export class BacklinkSitesService {
 
       let titleInput = null;
       try {
-        await page.waitForSelector(
-          titleSelectors.join(', '),
-          { timeout: 30000 },
-        );
+        await page.waitForSelector(titleSelectors.join(', '), {
+          timeout: 30000,
+        });
       } catch {
         this.logger.warn('제목 필드 대기 타임아웃 (30초)');
       }
@@ -597,14 +601,15 @@ export class BacklinkSitesService {
         const diagInfo = await page.evaluate(() => {
           const inputs = document.querySelectorAll('input');
           const inputList = Array.from(inputs).map(
-            (i) =>
-              `${i.type}:${i.name || i.id || i.placeholder || 'no-id'}`,
+            (i) => `${i.type}:${i.name || i.id || i.placeholder || 'no-id'}`,
           );
           const scripts = document.querySelectorAll('script');
           const bodyLen = document.body?.innerHTML?.length || 0;
           const bodyText = document.body?.innerText?.substring(0, 300) || '';
           const readyState = document.readyState;
-          const reactRoot = document.querySelector('#root, #__next, [data-reactroot]');
+          const reactRoot = document.querySelector(
+            '#root, #__next, [data-reactroot]',
+          );
           const allElCount = document.querySelectorAll('*').length;
           return [
             `URL: ${location.href}`,
@@ -886,7 +891,9 @@ export class BacklinkSitesService {
           .map((b) => b.textContent?.trim() || '')
           .filter(Boolean);
       });
-      this.logger.log(`발행 다이얼로그 버튼 목록: [${visibleButtons.join(' | ')}]`);
+      this.logger.log(
+        `발행 다이얼로그 버튼 목록: [${visibleButtons.join(' | ')}]`,
+      );
 
       const publishBtnClicked = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button')).filter(
@@ -1028,17 +1035,18 @@ export class BacklinkSitesService {
 
   // ── 유틸리티 ──
 
-  private async createBrowser(
-    options?: { useResidentialProxy?: boolean },
-  ): Promise<Browser> {
-    const proxyHost = process.env.BRIGHTDATA_PROXY_HOST;
-    const proxyUser = process.env.BRIGHTDATA_PROXY_USERNAME;
-    const proxyPass = process.env.BRIGHTDATA_PROXY_PASSWORD;
+  private async createBrowser(options?: {
+    useResidentialProxy?: boolean;
+  }): Promise<Browser> {
+    const proxyHost = process.env.PROXY_HOST;
+    const proxyPort = process.env.PROXY_PORT;
+    const proxyUser = process.env.PROXY_USERNAME;
+    const proxyPass = process.env.PROXY_PASSWORD;
     const useProxy =
-      options?.useResidentialProxy && proxyHost && proxyUser && proxyPass;
+      options?.useResidentialProxy && proxyHost && proxyPort && proxyUser && proxyPass;
 
     this.logger.log(
-      `CloakBrowser 스텔스 브라우저 실행${useProxy ? ' (BrightData Residential Proxy)' : ''}`,
+      `CloakBrowser 스텔스 브라우저 실행${useProxy ? ` (Proxy: ${proxyHost}:${proxyPort})` : ''}`,
     );
 
     try {
@@ -1057,13 +1065,13 @@ export class BacklinkSitesService {
 
       if (useProxy) {
         launchOptions.proxy = {
-          server: `http://${proxyHost}`,
+          server: `http://${proxyHost}:${proxyPort}`,
           username: proxyUser,
           password: proxyPass,
         };
       } else if (options?.useResidentialProxy) {
         this.logger.warn(
-          'BRIGHTDATA_PROXY_* 환경변수 미설정 – 프록시 없이 실행',
+          'PROXY_* 환경변수 미설정 – 프록시 없이 실행',
         );
       }
 
