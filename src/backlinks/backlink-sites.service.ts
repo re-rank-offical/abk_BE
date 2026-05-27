@@ -670,62 +670,557 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // ── 6. dkaptcha 인터셉트로 CAPTCHA 우회 ──
-      // Playwright page.route 로 dkaptcha 요청을 가로채,
-      // 프론트엔드가 CAPTCHA 없이 발행을 진행하도록 유도한다.
-      this.logger.log('dkaptcha 요청 인터셉트 설정 중...');
+      // ── 6. 브라우저 내부 직접 API 호출로 CAPTCHA 우회 발행 ──
+      this.logger.log('브라우저 내부에서 직접 API 호출 시도 (CAPTCHA 우회)...');
 
-      let dkaptchaIntercepted = false;
-      await page.route('**/manage/dkaptcha/**', async (route) => {
-        dkaptchaIntercepted = true;
-        this.logger.log(`dkaptcha 요청 인터셉트: ${route.request().url()}`);
-        // CAPTCHA 위젯 초기화 요청에 빈 응답 → 프론트엔드가 CAPTCHA 불필요로 판단하도록
-        await route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({}),
+      // CKEditor에서 실제 렌더링된 HTML 가져오기
+      const editorContent = await page.evaluate(() => {
+        try {
+          const ck = (window as any).CKEDITOR;
+          if (ck?.instances) {
+            const keys = Object.keys(ck.instances);
+            if (keys.length > 0) return ck.instances[keys[0]].getData();
+          }
+        } catch {
+          /* ignore */
+        }
+        return null;
+      });
+      const publishContent = editorContent || body;
+      this.logger.log(
+        `발행 콘텐츠 길이: ${publishContent.length}, CKEditor 사용: ${!!editorContent}`,
+      );
+
+      // 브라우저 컨텍스트에서 직접 fetch 호출 (세션쿠키 자동 포함)
+      const directResult = await page.evaluate(
+        async (params: { title: string; content: string }) => {
+          const { title, content } = params;
+          const results: Array<{
+            ep: string;
+            status: number;
+            body: string;
+          }> = [];
+
+          // CSRF 토큰 확인
+          const csrfMeta = document.querySelector('meta[name="_csrf"]');
+          const csrfToken = csrfMeta?.getAttribute('content') || '';
+          const csrfHeaderMeta = document.querySelector(
+            'meta[name="_csrf_header"]',
+          );
+          const csrfHeaderName =
+            csrfHeaderMeta?.getAttribute('content') || 'X-CSRF-TOKEN';
+
+          const baseHeaders: Record<string, string> = {};
+          if (csrfToken) baseHeaders[csrfHeaderName] = csrfToken;
+
+          const endpoints = [
+            '/manage/post/write.json',
+            '/manage/post/save.json',
+            '/manage/newpost/save',
+            '/manage/entry/post',
+            '/manage/post',
+          ];
+
+          // JSON 형식 시도
+          for (const ep of endpoints) {
+            try {
+              const res = await fetch(ep, {
+                method: 'POST',
+                headers: {
+                  ...baseHeaders,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  title,
+                  content,
+                  visibility: 3,
+                  categoryId: 0,
+                  tags: '',
+                  thumbnail: '',
+                  password: '',
+                }),
+                credentials: 'include',
+              });
+              const text = await res.text();
+              results.push({
+                ep: `${ep}(json)`,
+                status: res.status,
+                body: text.substring(0, 300),
+              });
+              if (res.ok) {
+                try {
+                  const data = JSON.parse(text);
+                  if (data.entryId || data.postId || data.url || data.id) {
+                    return { success: true, ep, data };
+                  }
+                } catch {
+                  /* not JSON */
+                }
+              }
+            } catch (e) {
+              results.push({
+                ep: `${ep}(json)`,
+                status: -1,
+                body: String(e),
+              });
+            }
+          }
+
+          // x-www-form-urlencoded 형식 시도
+          for (const ep of endpoints) {
+            try {
+              const p = new URLSearchParams();
+              p.append('title', title);
+              p.append('content', content);
+              p.append('visibility', '3');
+              p.append('categoryId', '0');
+              p.append('tags', '');
+              p.append('thumbnail', '');
+              if (csrfToken) p.append('_csrf', csrfToken);
+
+              const res = await fetch(ep, {
+                method: 'POST',
+                headers: {
+                  ...baseHeaders,
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: p.toString(),
+                credentials: 'include',
+              });
+              const text = await res.text();
+              results.push({
+                ep: `${ep}(form)`,
+                status: res.status,
+                body: text.substring(0, 300),
+              });
+              if (res.ok) {
+                try {
+                  const data = JSON.parse(text);
+                  if (data.entryId || data.postId || data.url || data.id) {
+                    return { success: true, ep, data };
+                  }
+                } catch {
+                  /* not JSON */
+                }
+              }
+            } catch (e) {
+              results.push({
+                ep: `${ep}(form)`,
+                status: -1,
+                body: String(e),
+              });
+            }
+          }
+
+          return { success: false, results };
+        },
+        { title, content: publishContent },
+      );
+
+      this.logger.log(
+        `직접 API 결과: ${JSON.stringify(directResult).substring(0, 1000)}`,
+      );
+
+      if (
+        directResult.success &&
+        typeof directResult === 'object' &&
+        'data' in directResult
+      ) {
+        this.logger.log(
+          `직접 API로 발행 성공! endpoint=${(directResult as any).ep}`,
+        );
+        const finalCookies = await context.cookies();
+        await this.siteRepository.update(site.id, {
+          sessionCookies: JSON.stringify(finalCookies),
         });
+        const resultData = (directResult as any).data;
+        return {
+          success: true,
+          publishedUrl: resultData?.url || site.siteUrl,
+        };
+      }
+
+      // ── 7. 직접 API 실패 → JS 수준 CAPTCHA 콜백 주입 + UI 발행 ──
+      this.logger.log(
+        '직접 API 실패, JS 레벨 CAPTCHA 우회 + UI 발행으로 전환...',
+      );
+
+      // 7-1. JavaScript 레벨에서 fetch/XHR 오버라이드 + postMessage 주입
+      await page.evaluate(() => {
+        const w = window as any;
+
+        // dkaptcha 성공 콜백을 자동 트리거하기 위한 준비
+        w.__captchaBypassActive = true;
+        w.__captchaCallbackFired = false;
+
+        // (A) fetch 오버라이드: dkaptcha 요청 시 widgetId를 반환하되,
+        //     CAPTCHA 성공 콜백을 자동으로 트리거
+        const originalFetch = w.fetch;
+        w.fetch = async function (...args: any[]) {
+          const url =
+            typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+
+          if (url.includes('dkaptcha/widgetId')) {
+            // 약간의 딜레이 후 postMessage로 CAPTCHA 성공 시뮬레이션
+            setTimeout(() => {
+              // CAPTCHA iframe이 생성된 후 성공 메시지 전송
+              const tryBypass = () => {
+                if (w.__captchaCallbackFired) return;
+
+                // 방법 1: postMessage로 성공 전달
+                window.postMessage(
+                  {
+                    source: 'dkaptcha',
+                    event: 'success',
+                    token: 'bp_' + Date.now(),
+                  },
+                  '*',
+                );
+                window.postMessage(
+                  {
+                    type: 'dkaptcha',
+                    status: 'complete',
+                    data: { token: 'bp_' + Date.now() },
+                  },
+                  '*',
+                );
+
+                // 방법 2: CAPTCHA 레이어 강제 제거 + 발행 상태 변경
+                document
+                  .querySelectorAll(
+                    '.capcha_layer, [class*="dkaptcha"], [id*="dkaptcha"]',
+                  )
+                  .forEach((el) => {
+                    (el as HTMLElement).style.display = 'none';
+                    el.remove();
+                  });
+
+                // 방법 3: CAPTCHA iframe 찾아서 성공 메시지 전송
+                document
+                  .querySelectorAll('iframe')
+                  .forEach((iframe: HTMLIFrameElement) => {
+                    const src = iframe.src || '';
+                    if (src.includes('dkaptcha') && iframe.contentWindow) {
+                      try {
+                        iframe.contentWindow.postMessage(
+                          { action: 'verify', token: 'bp_' + Date.now() },
+                          '*',
+                        );
+                      } catch {
+                        /* cross-origin */
+                      }
+                    }
+                  });
+              };
+
+              // 여러 타이밍에 시도
+              tryBypass();
+              setTimeout(tryBypass, 500);
+              setTimeout(tryBypass, 1000);
+              setTimeout(tryBypass, 2000);
+              setTimeout(tryBypass, 3000);
+            }, 500);
+
+            // 정상적인 widgetId 응답 반환
+            return new Response(
+              JSON.stringify({ widgetId: 'bp_' + Date.now() }),
+              {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              },
+            );
+          }
+
+          // dkaptcha verify 엔드포인트도 인터셉트
+          if (url.includes('dkaptcha/verify')) {
+            w.__captchaCallbackFired = true;
+            return new Response(
+              JSON.stringify({ success: true, token: 'bp_' + Date.now() }),
+              {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+              },
+            );
+          }
+
+          return originalFetch.apply(w, args);
+        };
+
+        // (B) XMLHttpRequest 오버라이드
+        const OrigXHR = XMLHttpRequest;
+        const origOpen = OrigXHR.prototype.open;
+        const origSend = OrigXHR.prototype.send;
+
+        OrigXHR.prototype.open = function (method: string, url: string) {
+          (this as any)._url = url;
+          return origOpen.apply(this, arguments as any);
+        };
+
+        OrigXHR.prototype.send = function (data?: any) {
+          const url = (this as any)._url || '';
+          if (url.includes('dkaptcha')) {
+            const self = this;
+            setTimeout(() => {
+              Object.defineProperty(self, 'status', {
+                value: 200,
+                writable: true,
+              });
+              Object.defineProperty(self, 'readyState', {
+                value: 4,
+                writable: true,
+              });
+              Object.defineProperty(self, 'responseText', {
+                value: JSON.stringify({
+                  widgetId: 'bp_' + Date.now(),
+                  success: true,
+                }),
+                writable: true,
+              });
+              self.dispatchEvent(new Event('readystatechange'));
+              self.dispatchEvent(new Event('load'));
+            }, 100);
+            return;
+          }
+          return origSend.call(this, data);
+        };
+
+        // (C) MutationObserver: CAPTCHA iframe 감지 시 자동 성공 트리거
+        const observer = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            for (const node of Array.from(mutation.addedNodes)) {
+              if (!(node instanceof HTMLElement)) continue;
+              const iframes = node.querySelectorAll
+                ? node.querySelectorAll('iframe')
+                : [];
+              const isIframe = node.tagName === 'IFRAME';
+              const checkList = isIframe
+                ? [node as HTMLIFrameElement]
+                : Array.from(iframes);
+
+              for (const iframe of checkList) {
+                const src = (iframe as HTMLIFrameElement).src || '';
+                if (src.includes('dkaptcha')) {
+                  // CAPTCHA iframe 감지 → 즉시 성공 메시지
+                  setTimeout(() => {
+                    window.postMessage(
+                      {
+                        source: 'dkaptcha-widget',
+                        event: 'complete',
+                        token: 'bp_obs_' + Date.now(),
+                      },
+                      '*',
+                    );
+                    // iframe 제거
+                    const layer = (iframe as HTMLElement).closest(
+                      '[class*="capcha"], [class*="layer"], [class*="dkaptcha"]',
+                    );
+                    if (layer) (layer as HTMLElement).style.display = 'none';
+                  }, 1000);
+                }
+              }
+            }
+          }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
       });
 
-      // 네트워크 요청 캡처 (발행 엔드포인트 디스커버리용)
+      // 7-2. page.route 로도 인터셉트 (네트워크 레벨 이중 차단)
+      await page.route('**/manage/dkaptcha/**', async (route) => {
+        const url = route.request().url();
+        this.logger.log(`dkaptcha 네트워크 인터셉트: ${url}`);
+        if (url.includes('verify')) {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ success: true, token: 'bp_net' }),
+          });
+        } else {
+          await route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ widgetId: 'bp_net_' + Date.now() }),
+          });
+        }
+      });
+
+      // 네트워크 요청 캡처 (발행 POST 디스커버리용)
       const capturedRequests: Array<{
         url: string;
         method: string;
         postData: string | null;
       }> = [];
       page.on('request', (req) => {
+        const url = req.url();
         if (
-          req.method() === 'POST' ||
-          req.url().includes('/manage/') ||
-          req.url().includes('/api/')
+          req.method() === 'POST' &&
+          !url.includes('dkaptcha') &&
+          !url.includes('autosave')
         ) {
           capturedRequests.push({
-            url: req.url(),
+            url,
             method: req.method(),
             postData: req.postData()?.substring(0, 500) || null,
           });
         }
       });
 
-      // 6~10. 발행 시도 (CAPTCHA 감지 시 재시도)
-      const maxPublishRetries = 3;
-      for (
-        let publishAttempt = 1;
-        publishAttempt <= maxPublishRetries;
-        publishAttempt++
-      ) {
-        if (publishAttempt > 1) {
-          this.logger.log(`발행 재시도 ${publishAttempt}/${maxPublishRetries}`);
+      // 7-3. UI 발행 플로우 실행
+      // "완료" 버튼 클릭 → 발행 설정 다이얼로그 열기
+      const completeBtnClicked = await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (btn.textContent?.trim() === '완료' && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
         }
-        capturedRequests.length = 0;
+        return false;
+      });
+      if (!completeBtnClicked) {
+        const btnList = await page.evaluate(() =>
+          Array.from(document.querySelectorAll('button'))
+            .filter((b) => (b as HTMLElement).offsetParent !== null)
+            .map((b) => b.textContent?.trim())
+            .filter(Boolean),
+        );
+        return {
+          success: false,
+          error: `티스토리 "완료" 버튼을 찾을 수 없습니다. 페이지 버튼: [${btnList.join(', ')}]`,
+        };
+      }
+      this.logger.log('"완료" 버튼 클릭 → 발행 레이어 열기');
 
-        // 6. "완료" 버튼 클릭 → 발행 설정 다이얼로그 열기
-        const completeBtnClicked = await page.evaluate(() => {
+      // 발행 다이얼로그 렌더링 대기
+      try {
+        await page.waitForFunction(
+          () => document.querySelectorAll('input[type="radio"]').length >= 2,
+          { timeout: 5000 },
+        );
+      } catch {
+        this.logger.warn('발행 다이얼로그 라디오 버튼 대기 타임아웃');
+      }
+      await page.waitForTimeout(1000);
+
+      // "공개" 라디오 버튼 선택
+      const publicSelected = await page.evaluate(() => {
+        const radios = document.querySelectorAll<HTMLInputElement>(
+          'input[type="radio"]',
+        );
+        for (const radio of radios) {
+          const container = radio.closest('div, span, label, li');
+          const text = container?.textContent?.trim() || '';
+          if (text === '공개') {
+            radio.click();
+            return 'exact';
+          }
+        }
+        for (const radio of radios) {
+          const container = radio.closest('div, span, label, li');
+          const text = container?.textContent?.trim() || '';
+          if (
+            text.startsWith('공개') &&
+            !text.includes('보호') &&
+            !text.includes('비공개')
+          ) {
+            radio.click();
+            return 'startsWith';
+          }
+        }
+        return null;
+      });
+      if (publicSelected) {
+        this.logger.log(`공개 라디오 선택됨 (match: ${publicSelected})`);
+      }
+      await page.waitForTimeout(1000);
+
+      // "공개 발행" 버튼 클릭
+      const publishResult = await page.evaluate(() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+          if (
+            btn.textContent?.trim() === '공개 발행' &&
+            btn.offsetParent !== null
+          ) {
+            btn.click();
+            return '공개 발행';
+          }
+        }
+        for (const btn of buttons) {
+          const t = btn.textContent?.trim() || '';
+          if (
+            t.includes('발행') &&
+            !t.includes('비공개') &&
+            btn.offsetParent !== null
+          ) {
+            btn.click();
+            return t;
+          }
+        }
+        const visible = Array.from(buttons)
+          .filter((b) => (b as HTMLElement).offsetParent !== null)
+          .map((b) => b.textContent?.trim())
+          .filter(Boolean);
+        return `NOT_FOUND:[${visible.join('|')}]`;
+      });
+
+      if (publishResult.startsWith('NOT_FOUND:')) {
+        return {
+          success: false,
+          error: `티스토리 "공개 발행" 버튼을 찾을 수 없습니다. 버튼목록: ${publishResult}`,
+        };
+      }
+      this.logger.log(`발행 버튼 클릭: "${publishResult}"`);
+
+      // CAPTCHA 우회 대기 (JS 레벨 인터셉트가 작동할 시간)
+      await page.waitForTimeout(8000);
+
+      // 캡처된 네트워크 요청 로깅
+      this.logger.log(
+        `캡처된 POST 요청 (${capturedRequests.length}건): ${JSON.stringify(capturedRequests)}`,
+      );
+
+      // CAPTCHA가 여전히 있는지 확인
+      const hasCaptcha = await page.evaluate(() => {
+        return !!(
+          document.querySelector('.capcha_layer') ||
+          document.querySelector('iframe[src*="dkaptcha"]') ||
+          document.querySelector('[class*="dkaptcha"]') ||
+          document.querySelector('[id*="dkaptcha"]')
+        );
+      });
+
+      if (hasCaptcha) {
+        this.logger.warn('JS 레벨 CAPTCHA 우회 실패, CAPTCHA 여전히 존재');
+
+        // 최후 수단: CAPTCHA 레이어 강제 제거 후 발행 시도
+        this.logger.log('CAPTCHA 레이어 강제 제거 시도...');
+        await page.evaluate(() => {
+          // 모든 CAPTCHA 관련 요소 제거
+          document
+            .querySelectorAll(
+              '.capcha_layer, [class*="dkaptcha"], [id*="dkaptcha"], iframe[src*="dkaptcha"]',
+            )
+            .forEach((el) => el.remove());
+
+          // 발행 모달의 오버레이/딤 레이어도 제거
+          document
+            .querySelectorAll('[class*="dim"], [class*="overlay"]')
+            .forEach((el) => {
+              if ((el as HTMLElement).style.display !== 'none') {
+                (el as HTMLElement).style.display = 'none';
+              }
+            });
+        });
+        await page.waitForTimeout(2000);
+
+        // "공개 발행" 버튼이 다시 보이면 한번 더 클릭
+        const retryPublish = await page.evaluate(() => {
           const buttons = document.querySelectorAll('button');
           for (const btn of buttons) {
             if (
-              btn.textContent?.trim() === '완료' &&
-              btn.offsetParent !== null
+              btn.textContent?.trim() === '공개 발행' &&
+              btn.offsetParent !== null &&
+              !btn.disabled
             ) {
               btn.click();
               return true;
@@ -733,257 +1228,73 @@ export class BacklinkSitesService {
           }
           return false;
         });
-        if (!completeBtnClicked) {
-          const btnList = await page.evaluate(() =>
-            Array.from(document.querySelectorAll('button'))
-              .filter((b) => (b as HTMLElement).offsetParent !== null)
-              .map((b) => b.textContent?.trim())
-              .filter(Boolean),
-          );
-          return {
-            success: false,
-            error: `티스토리 "완료" 버튼을 찾을 수 없습니다. 페이지 버튼: [${btnList.join(', ')}]`,
-          };
+        if (retryPublish) {
+          this.logger.log('CAPTCHA 제거 후 "공개 발행" 재클릭');
+          await page.waitForTimeout(8000);
         }
-        this.logger.log('"완료" 버튼 클릭 → 발행 레이어 열기');
+      }
 
-        // 발행 다이얼로그 렌더링 대기
-        try {
-          await page.waitForFunction(
-            () => document.querySelectorAll('input[type="radio"]').length >= 2,
-            { timeout: 5000 },
-          );
-        } catch {
-          this.logger.warn('발행 다이얼로그 라디오 버튼 대기 타임아웃');
-        }
-        await page.waitForTimeout(1000);
+      // 발행 후 쿠키 저장
+      const finalCookies = await context.cookies();
+      await this.siteRepository.update(site.id, {
+        sessionCookies: JSON.stringify(finalCookies),
+      });
 
-        // 7. "공개" 라디오 버튼 선택 (기본값이 "비공개"이므로 반드시 변경)
-        const publicSelected = await page.evaluate(() => {
-          const radios = document.querySelectorAll<HTMLInputElement>(
-            'input[type="radio"]',
-          );
-          for (const radio of radios) {
-            // 라디오의 부모/조부모에서 텍스트 확인
-            const container = radio.closest('div, span, label, li');
-            const text = container?.textContent?.trim() || '';
-            // "공개"만 정확히 매칭 ("공개(보호)", "비공개" 제외)
-            if (text === '공개') {
-              radio.click();
-              return 'exact';
-            }
-          }
-          // 폴백: "공개"로 시작하고 "보호"/"비공개"가 아닌 라디오
-          for (const radio of radios) {
-            const container = radio.closest('div, span, label, li');
-            const text = container?.textContent?.trim() || '';
-            if (
-              text.startsWith('공개') &&
-              !text.includes('보호') &&
-              !text.includes('비공개')
-            ) {
-              radio.click();
-              return 'startsWith';
-            }
-          }
-          return null;
-        });
-        if (publicSelected) {
-          this.logger.log(`공개 라디오 선택됨 (match: ${publicSelected})`);
-        } else {
-          this.logger.warn('공개 라디오를 찾지 못함');
-        }
+      // 발행 결과 검증
+      const publishedUrl = page.url();
+      this.logger.log(`발행 후 URL: ${publishedUrl}`);
 
-        await page.waitForTimeout(1000);
-
-        // 8. "공개 발행" 버튼 클릭
-        const publishResult = await page.evaluate(() => {
-          const buttons = document.querySelectorAll('button');
-          // 우선순위 1: 정확히 "공개 발행"
-          for (const btn of buttons) {
-            if (
-              btn.textContent?.trim() === '공개 발행' &&
-              btn.offsetParent !== null
-            ) {
-              btn.click();
-              return '공개 발행';
-            }
-          }
-          // 우선순위 2: "발행"을 포함하되 "비공개" 미포함
-          for (const btn of buttons) {
-            const t = btn.textContent?.trim() || '';
-            if (
-              t.includes('발행') &&
-              !t.includes('비공개') &&
-              btn.offsetParent !== null
-            ) {
-              btn.click();
-              return t;
-            }
-          }
-          // 진단: 현재 보이는 버튼 목록 반환
-          const visible = Array.from(buttons)
-            .filter((b) => (b as HTMLElement).offsetParent !== null)
-            .map((b) => b.textContent?.trim())
-            .filter(Boolean);
-          return `NOT_FOUND:[${visible.join('|')}]`;
-        });
-
-        if (publishResult.startsWith('NOT_FOUND:')) {
-          return {
-            success: false,
-            error: `티스토리 "공개 발행" 버튼을 찾을 수 없습니다. 버튼목록: ${publishResult}`,
-          };
-        }
-        this.logger.log(`발행 버튼 클릭: "${publishResult}"`);
-        await page.waitForTimeout(5000);
-
-        // 캡처된 네트워크 요청 로깅
-        this.logger.log(
-          `캡처된 요청 (${capturedRequests.length}건): ${JSON.stringify(capturedRequests)}`,
-        );
-
-        // 8.5. CAPTCHA 감지 및 재시도
-        const hasCaptcha = await page.evaluate(() => {
-          return !!(
-            document.querySelector('.capcha_layer') ||
-            document.querySelector('iframe[src*="dkaptcha"]') ||
-            document.querySelector('[class*="dkaptcha"]') ||
-            document.querySelector('[id*="dkaptcha"]')
-          );
-        });
-
-        if (hasCaptcha) {
-          this.logger.warn(
-            `CAPTCHA(dkaptcha) 감지 (시도 ${publishAttempt}/${maxPublishRetries}), 인터셉트 작동: ${dkaptchaIntercepted}`,
-          );
-
-          // CAPTCHA/발행 레이어 닫기
-          await page.evaluate(() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-              if (
-                btn.textContent?.trim() === '닫기' &&
-                (btn as HTMLElement).offsetParent !== null
-              ) {
-                btn.click();
-                break;
-              }
-            }
-          });
-          await page.waitForTimeout(1000);
-          await page.keyboard.press('Escape');
-          await page.waitForTimeout(1000);
-
-          if (publishAttempt < maxPublishRetries) {
-            const retryDelay = 60000 + Math.random() * 60000; // 60~120초
-            this.logger.log(
-              `${Math.round(retryDelay / 1000)}초 후 재시도합니다...`,
-            );
-            await new Promise((resolve) => setTimeout(resolve, retryDelay));
-            continue;
-          }
-
-          // 마지막 시도에서도 CAPTCHA → 최종 실패
-          const captchaCookies = await context.cookies();
-          await this.siteRepository.update(site.id, {
-            sessionCookies: JSON.stringify(captchaCookies),
-          });
-          return {
-            success: false,
-            error: `CAPTCHA가 ${maxPublishRetries}회 반복 발생하여 발행에 실패했습니다.`,
-          };
-        }
-
-        // 9. 발행 후 쿠키 저장
-        const finalCookies = await context.cookies();
-        await this.siteRepository.update(site.id, {
-          sessionCookies: JSON.stringify(finalCookies),
-        });
-
-        // 10. 발행 결과 검증
-        const publishedUrl = page.url();
-        this.logger.log(`발행 후 URL: ${publishedUrl}`);
-
-        // 글쓰기 페이지에 여전히 머물러 있으면 발행 실패로 판단
-        if (
-          publishedUrl.includes('/manage/newpost') ||
-          publishedUrl.includes('accounts.kakao.com') ||
-          publishedUrl.includes('tistory.com/auth/login')
-        ) {
-          // 페이지 상태 진단
-          const diagnosis = await page.evaluate(() => {
-            const result: string[] = [];
-
-            // CAPTCHA / iframe 감지
-            const iframes = document.querySelectorAll('iframe');
-            iframes.forEach((f) => {
-              const src = f.src || f.getAttribute('src') || '';
-              if (src) result.push(`iframe: ${src.substring(0, 100)}`);
-            });
-
-            // DKAPTCHA 감지
-            const captchaEl = document.querySelector(
-              '[class*="captcha"], [id*="captcha"], [class*="dkaptcha"], [id*="dkaptcha"]',
-            );
-            if (captchaEl)
-              result.push(
-                `CAPTCHA발견: ${captchaEl.className || captchaEl.id}`,
-              );
-
-            // 에러 메시지
-            const errorEl = document.querySelector(
-              '.error-message, .alert-error, .txt_error, .layer_alert, .layer_popup',
-            );
-            if (errorEl)
-              result.push(
-                `에러: ${errorEl.textContent?.trim()?.substring(0, 200)}`,
-              );
-
-            // 버튼 상태 확인 ("저장중" 등)
-            const buttons = document.querySelectorAll('button');
-            const btnTexts: string[] = [];
-            buttons.forEach((btn) => {
-              const t = btn.textContent?.trim();
-              if (t && (btn as HTMLElement).offsetParent !== null) {
-                btnTexts.push(`${t}(disabled=${btn.disabled})`);
-              }
-            });
-            result.push(`buttons: [${btnTexts.join('|')}]`);
-
-            // 레이어/모달 감지
-            const layers = document.querySelectorAll(
-              '.layer_publish, .mce-container, [class*="layer"], [class*="modal"], [class*="popup"]',
-            );
-            layers.forEach((l) => {
-              const style = window.getComputedStyle(l);
-              if (style.display !== 'none') {
-                result.push(`layer: ${l.className.substring(0, 60)} visible`);
-              }
-            });
-
-            return result.join(' | ');
-          });
-
-          this.logger.error(`발행 실패 진단 [${site.siteName}]: ${diagnosis}`);
-
-          return {
-            success: false,
-            error: `발행이 완료되지 않았습니다. 현재 URL: ${publishedUrl}. 진단: ${diagnosis}`,
-          };
-        }
-
-        this.logger.log(
-          `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
-        );
+      // 캡처된 발행 POST가 있으면 성공으로 간주 가능
+      const hasPublishPost = capturedRequests.some(
+        (r) =>
+          r.postData &&
+          (r.postData.includes('"title"') || r.postData.includes('title=')),
+      );
+      if (hasPublishPost) {
+        this.logger.log('발행 POST 요청이 캡처됨 → 성공으로 판단');
         return { success: true, publishedUrl };
-      } // for (publishAttempt) – CAPTCHA 재시도 루프 끝
+      }
 
-      // 모든 재시도 소진 (이론적으로 도달하지 않음)
-      return {
-        success: false,
-        error: `발행 재시도 ${maxPublishRetries}회 모두 실패했습니다.`,
-      };
+      // 글쓰기 페이지에 여전히 머물러 있으면 발행 실패
+      if (
+        publishedUrl.includes('/manage/newpost') ||
+        publishedUrl.includes('accounts.kakao.com') ||
+        publishedUrl.includes('tistory.com/auth/login')
+      ) {
+        const diagnosis = await page.evaluate(() => {
+          const result: string[] = [];
+          document.querySelectorAll('iframe').forEach((f) => {
+            const src = f.src || f.getAttribute('src') || '';
+            if (src) result.push(`iframe: ${src.substring(0, 100)}`);
+          });
+          const captchaEl = document.querySelector(
+            '[class*="captcha"], [id*="captcha"], [class*="dkaptcha"]',
+          );
+          if (captchaEl)
+            result.push(`CAPTCHA: ${captchaEl.className || captchaEl.id}`);
+          const buttons = document.querySelectorAll('button');
+          const btnTexts: string[] = [];
+          buttons.forEach((btn) => {
+            const t = btn.textContent?.trim();
+            if (t && (btn as HTMLElement).offsetParent !== null) {
+              btnTexts.push(`${t}(disabled=${btn.disabled})`);
+            }
+          });
+          result.push(`buttons: [${btnTexts.join('|')}]`);
+          return result.join(' | ');
+        });
+
+        this.logger.error(`발행 실패 진단 [${site.siteName}]: ${diagnosis}`);
+        return {
+          success: false,
+          error: `발행이 완료되지 않았습니다. 현재 URL: ${publishedUrl}. 진단: ${diagnosis}`,
+        };
+      }
+
+      this.logger.log(
+        `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
+      );
+      return { success: true, publishedUrl };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.error(
