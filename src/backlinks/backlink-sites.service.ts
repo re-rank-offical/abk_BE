@@ -381,7 +381,7 @@ export class BacklinkSitesService {
         }
       }
 
-      const page = context.pages()[0] || (await context.newPage());
+      const page = await context.newPage();
 
       // 다이얼로그(confirm/alert) 자동 수락 – 임시저장 복구 팝업 등 차단 방지
       page.on('dialog', async (dialog) => {
