@@ -361,6 +361,7 @@ export class BacklinkSitesService {
         viewport: { width: 1280, height: 900 },
         locale: 'ko-KR',
         timezoneId: 'Asia/Seoul',
+        ignoreHTTPSErrors: true, // BrightData 프록시 SSL 인증서 허용
       });
 
       // 1. 세션 쿠키 복원
