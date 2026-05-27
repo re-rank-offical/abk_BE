@@ -735,7 +735,26 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // 8. "공개 발행" 버튼 클릭
+      // 8. 네트워크 요청 캡처 + "공개 발행" 버튼 클릭
+      const capturedRequests: Array<{
+        url: string;
+        method: string;
+        postData: string | null;
+      }> = [];
+      page.on('request', (req) => {
+        if (
+          req.method() === 'POST' ||
+          req.url().includes('/manage/') ||
+          req.url().includes('/api/')
+        ) {
+          capturedRequests.push({
+            url: req.url(),
+            method: req.method(),
+            postData: req.postData()?.substring(0, 500) || null,
+          });
+        }
+      });
+
       const publishResult = await page.evaluate(() => {
         const buttons = document.querySelectorAll('button');
         // 우선순위 1: 정확히 "공개 발행"
@@ -776,6 +795,11 @@ export class BacklinkSitesService {
       }
       this.logger.log(`발행 버튼 클릭: "${publishResult}"`);
       await page.waitForTimeout(5000);
+
+      // 캡처된 네트워크 요청 로깅
+      this.logger.log(
+        `캡처된 요청 (${capturedRequests.length}건): ${JSON.stringify(capturedRequests)}`,
+      );
 
       // 9. 발행 후 쿠키 저장
       const finalCookies = await context.cookies();
