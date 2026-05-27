@@ -376,6 +376,19 @@ export class BacklinkSitesService {
 
       const page = await context.newPage();
 
+      // 브라우저 콘솔 로그 수집 (에러/경고만)
+      page.on('console', (msg) => {
+        const type = msg.type();
+        if (type === 'error' || type === 'warning') {
+          this.logger.warn(`[브라우저 ${type}] ${msg.text().substring(0, 200)}`);
+        }
+      });
+
+      // 페이지 에러(크래시) 감지
+      page.on('pageerror', (err) => {
+        this.logger.error(`[페이지 에러] ${err.message.substring(0, 200)}`);
+      });
+
       // 다이얼로그(confirm/alert) 자동 수락 – 임시저장 복구 팝업 등 차단 방지
       page.on('dialog', async (dialog) => {
         this.logger.log(
@@ -439,8 +452,8 @@ export class BacklinkSitesService {
         site.writeUrl || `${site.siteUrl.replace(/\/$/, '')}/manage/newpost`;
       try {
         await page.goto(writeUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000,
+          waitUntil: 'load',
+          timeout: 45000,
         });
       } catch (navErr) {
         // 리다이렉트로 인한 "interrupted by another navigation" 에러는 무시
@@ -448,7 +461,14 @@ export class BacklinkSitesService {
           `글쓰기 페이지 이동 중 에러 (리다이렉트 가능): ${navErr instanceof Error ? navErr.message.substring(0, 100) : String(navErr)}`,
         );
       }
-      await page.waitForTimeout(3000);
+
+      // SPA JS 번들 완전 로드 대기
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 20000 });
+        this.logger.log('networkidle 상태 도달');
+      } catch {
+        this.logger.warn('networkidle 대기 타임아웃 (20초) – 계속 진행');
+      }
 
       // 3-1. 로그인 필요 여부 확인
       const currentUrl = page.url();
@@ -543,7 +563,7 @@ export class BacklinkSitesService {
       const preTitleUrl = page.url();
       this.logger.log(`제목 입력 시도 – URL: ${preTitleUrl}`);
 
-      // SPA가 완전히 렌더링될 때까지 대기 (최대 15초)
+      // SPA가 완전히 렌더링될 때까지 대기 (최대 30초)
       const titleSelectors = [
         '#post-title-inp',
         'input[name="title"]',
@@ -555,10 +575,10 @@ export class BacklinkSitesService {
       try {
         await page.waitForSelector(
           titleSelectors.join(', '),
-          { timeout: 15000 },
+          { timeout: 30000 },
         );
       } catch {
-        this.logger.warn('제목 필드 대기 타임아웃 (15초)');
+        this.logger.warn('제목 필드 대기 타임아웃 (30초)');
       }
 
       for (const sel of titleSelectors) {
@@ -573,14 +593,30 @@ export class BacklinkSitesService {
         await titleInput.fill(title);
         this.logger.log('제목 입력 완료');
       } else {
-        // 페이지 상태 진단
+        // 상세 페이지 상태 진단
         const diagInfo = await page.evaluate(() => {
           const inputs = document.querySelectorAll('input');
           const inputList = Array.from(inputs).map(
             (i) =>
               `${i.type}:${i.name || i.id || i.placeholder || 'no-id'}`,
           );
-          return `URL: ${location.href}, inputs: [${inputList.slice(0, 10).join(', ')}], title: ${document.title}`;
+          const scripts = document.querySelectorAll('script');
+          const bodyLen = document.body?.innerHTML?.length || 0;
+          const bodyText = document.body?.innerText?.substring(0, 300) || '';
+          const readyState = document.readyState;
+          const reactRoot = document.querySelector('#root, #__next, [data-reactroot]');
+          const allElCount = document.querySelectorAll('*').length;
+          return [
+            `URL: ${location.href}`,
+            `readyState: ${readyState}`,
+            `title: "${document.title}"`,
+            `scripts: ${scripts.length}`,
+            `bodyHTML길이: ${bodyLen}`,
+            `전체요소수: ${allElCount}`,
+            `inputs: [${inputList.slice(0, 10).join(', ')}]`,
+            `reactRoot: ${reactRoot ? reactRoot.tagName + '#' + reactRoot.id : 'none'}`,
+            `bodyText: "${bodyText.replace(/\n/g, ' ').substring(0, 200)}"`,
+          ].join(' | ');
         });
         this.logger.error(`제목 필드 미발견. 진단: ${diagInfo}`);
         return {
