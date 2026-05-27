@@ -785,6 +785,7 @@ export class BacklinkSitesService {
 
       // 10. 발행 결과 검증
       const publishedUrl = page.url();
+      this.logger.log(`발행 후 URL: ${publishedUrl}`);
 
       // 글쓰기 페이지에 여전히 머물러 있으면 발행 실패로 판단
       if (
@@ -792,18 +793,63 @@ export class BacklinkSitesService {
         publishedUrl.includes('accounts.kakao.com') ||
         publishedUrl.includes('tistory.com/auth/login')
       ) {
-        // 페이지 내 에러 메시지 수집 시도
-        const pageError = await page.evaluate(() => {
-          const errorEl = document.querySelector(
-            '.error-message, .alert-error, .txt_error, .layer_alert',
+        // 페이지 상태 진단
+        const diagnosis = await page.evaluate(() => {
+          const result: string[] = [];
+
+          // CAPTCHA / iframe 감지
+          const iframes = document.querySelectorAll('iframe');
+          iframes.forEach((f) => {
+            const src = f.src || f.getAttribute('src') || '';
+            if (src) result.push(`iframe: ${src.substring(0, 100)}`);
+          });
+
+          // DKAPTCHA 감지
+          const captchaEl = document.querySelector(
+            '[class*="captcha"], [id*="captcha"], [class*="dkaptcha"], [id*="dkaptcha"]',
           );
-          return errorEl?.textContent?.trim() || null;
+          if (captchaEl)
+            result.push(`CAPTCHA발견: ${captchaEl.className || captchaEl.id}`);
+
+          // 에러 메시지
+          const errorEl = document.querySelector(
+            '.error-message, .alert-error, .txt_error, .layer_alert, .layer_popup',
+          );
+          if (errorEl)
+            result.push(
+              `에러: ${errorEl.textContent?.trim()?.substring(0, 200)}`,
+            );
+
+          // 버튼 상태 확인 ("저장중" 등)
+          const buttons = document.querySelectorAll('button');
+          const btnTexts: string[] = [];
+          buttons.forEach((btn) => {
+            const t = btn.textContent?.trim();
+            if (t && (btn as HTMLElement).offsetParent !== null) {
+              btnTexts.push(`${t}(disabled=${btn.disabled})`);
+            }
+          });
+          result.push(`buttons: [${btnTexts.join('|')}]`);
+
+          // 레이어/모달 감지
+          const layers = document.querySelectorAll(
+            '.layer_publish, .mce-container, [class*="layer"], [class*="modal"], [class*="popup"]',
+          );
+          layers.forEach((l) => {
+            const style = window.getComputedStyle(l);
+            if (style.display !== 'none') {
+              result.push(`layer: ${l.className.substring(0, 60)} visible`);
+            }
+          });
+
+          return result.join(' | ');
         });
+
+        this.logger.error(`발행 실패 진단 [${site.siteName}]: ${diagnosis}`);
+
         return {
           success: false,
-          error: pageError
-            ? `발행 실패: ${pageError}`
-            : `발행이 완료되지 않았습니다. 현재 URL: ${publishedUrl}`,
+          error: `발행이 완료되지 않았습니다. 현재 URL: ${publishedUrl}. 진단: ${diagnosis}`,
         };
       }
 
