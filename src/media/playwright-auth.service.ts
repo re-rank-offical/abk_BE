@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { chromium, Browser, Page, BrowserContext } from 'playwright';
+import { chromium, Browser, Page, BrowserContext } from 'playwright-core';
+import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { MediaPlatform } from '../database/entities/media-connection.entity';
 
 interface AuthResult {
@@ -31,13 +33,15 @@ export class PlaywrightAuthService {
    */
   private async getBrowser(): Promise<Browser> {
     if (!this.browser || !this.browser.isConnected()) {
-      const fs = require('fs');
-      const { execSync } = require('child_process');
+      // fs, execSync는 top-level에서 import됨
 
       let execPath: string | undefined = undefined;
 
       // 1. 환경변수로 직접 지정된 경로 확인
-      if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
+      if (
+        process.env.CHROMIUM_PATH &&
+        fs.existsSync(process.env.CHROMIUM_PATH)
+      ) {
         execPath = process.env.CHROMIUM_PATH;
         this.logger.log(`환경변수 CHROMIUM_PATH 사용: ${execPath}`);
       }
@@ -45,7 +49,10 @@ export class PlaywrightAuthService {
       // 2. 시스템 chromium 찾기 (nixpacks 환경)
       if (!execPath) {
         try {
-          const systemChromium = execSync('which chromium || which chromium-browser || which google-chrome', { encoding: 'utf-8' }).trim();
+          const systemChromium = execSync(
+            'which chromium || which chromium-browser || which google-chrome',
+            { encoding: 'utf-8' },
+          ).trim();
           if (systemChromium && fs.existsSync(systemChromium)) {
             execPath = systemChromium;
             this.logger.log(`시스템 Chromium 발견: ${execPath}`);
@@ -57,7 +64,8 @@ export class PlaywrightAuthService {
 
       // 3. Playwright 번들 Chromium 경로 확인
       if (!execPath) {
-        const playwrightPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
+        const playwrightPath =
+          process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
         const possiblePaths = [
           `${playwrightPath}/chromium-1200/chrome-linux64/chrome`,
           `${playwrightPath}/chromium-1200/chrome-linux/chrome`,
@@ -73,7 +81,9 @@ export class PlaywrightAuthService {
         }
       }
 
-      this.logger.log(`최종 브라우저 경로: ${execPath || 'Playwright 기본값 사용'}`);
+      this.logger.log(
+        `최종 브라우저 경로: ${execPath || 'Playwright 기본값 사용'}`,
+      );
 
       this.browser = await chromium.launch({
         headless: true,
@@ -113,8 +123,7 @@ export class PlaywrightAuthService {
    * 서버리스 환경에서 안정성을 위해 공유 브라우저 대신 사용
    */
   private async createFreshBrowser(): Promise<Browser> {
-    const fs = require('fs');
-    const { execSync } = require('child_process');
+    // fs, execSync는 top-level에서 import됨
 
     let execPath: string | undefined = undefined;
 
@@ -124,7 +133,10 @@ export class PlaywrightAuthService {
 
     if (!execPath) {
       try {
-        const systemChromium = execSync('which chromium || which chromium-browser || which google-chrome', { encoding: 'utf-8' }).trim();
+        const systemChromium = execSync(
+          'which chromium || which chromium-browser || which google-chrome',
+          { encoding: 'utf-8' },
+        ).trim();
         if (systemChromium && fs.existsSync(systemChromium)) {
           execPath = systemChromium;
         }
@@ -134,7 +146,8 @@ export class PlaywrightAuthService {
     }
 
     if (!execPath) {
-      const playwrightPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
+      const playwrightPath =
+        process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
       const possiblePaths = [
         `${playwrightPath}/chromium-1200/chrome-linux64/chrome`,
         `${playwrightPath}/chromium-1200/chrome-linux/chrome`,
@@ -148,7 +161,9 @@ export class PlaywrightAuthService {
       }
     }
 
-    this.logger.log(`발행용 새 브라우저 생성: ${execPath || 'Playwright 기본값'}`);
+    this.logger.log(
+      `발행용 새 브라우저 생성: ${execPath || 'Playwright 기본값'}`,
+    );
 
     return await chromium.launch({
       headless: true,
@@ -189,9 +204,9 @@ export class PlaywrightAuthService {
     // key=value; key=value 문자열 형식을 Playwright 쿠키 배열로 변환
     return trimmed
       .split(';')
-      .map(pair => pair.trim())
-      .filter(pair => pair.includes('='))
-      .map(pair => {
+      .map((pair) => pair.trim())
+      .filter((pair) => pair.includes('='))
+      .map((pair) => {
         const equalIndex = pair.indexOf('=');
         const name = pair.substring(0, equalIndex).trim();
         const value = pair.substring(equalIndex + 1).trim();
@@ -256,20 +271,22 @@ export class PlaywrightAuthService {
 
       // 로그인 성공 여부 확인
       const afterLoginUrl = page.url();
-      
+
       // 캡챠 체크
-      if (afterLoginUrl.includes('captcha') || await page.$('#captcha')) {
+      if (afterLoginUrl.includes('captcha') || (await page.$('#captcha'))) {
         return {
           success: false,
-          error: '캡챠 인증이 필요합니다. 네이버 웹에서 직접 로그인 후 다시 시도해주세요.',
+          error:
+            '캡챠 인증이 필요합니다. 네이버 웹에서 직접 로그인 후 다시 시도해주세요.',
         };
       }
 
       // 2단계 인증 체크
-      if (afterLoginUrl.includes('auth') || await page.$('.login_second')) {
+      if (afterLoginUrl.includes('auth') || (await page.$('.login_second'))) {
         return {
           success: false,
-          error: '2단계 인증이 필요합니다. 네이버 앱에서 인증 후 다시 시도해주세요.',
+          error:
+            '2단계 인증이 필요합니다. 네이버 앱에서 인증 후 다시 시도해주세요.',
         };
       }
 
@@ -284,7 +301,10 @@ export class PlaywrightAuthService {
       }
 
       // 여전히 로그인 페이지면 실패
-      if (afterLoginUrl.includes('nidlogin') || afterLoginUrl.includes('login')) {
+      if (
+        afterLoginUrl.includes('nidlogin') ||
+        afterLoginUrl.includes('login')
+      ) {
         return {
           success: false,
           error: '로그인에 실패했습니다. 아이디/비밀번호를 확인해주세요.',
@@ -304,7 +324,7 @@ export class PlaywrightAuthService {
 
   /**
    * 티스토리(카카오) 로그인 수행 (재사용 가능한 헬퍼 메서드)
-   * 
+   *
    * 2026년 기준 카카오 로그인 페이지 구조:
    * - accounts.kakao.com/login/
    * - 이메일: textbox "Enter Account Information" 또는 placeholder로 찾기
@@ -343,7 +363,9 @@ export class PlaywrightAuthService {
 
         // 방법 1: "카카오계정으로 로그인" 링크 (티스토리 로그인 페이지)
         try {
-          const kakaoLoginLink = page.getByRole('link', { name: /카카오계정으로 로그인/i });
+          const kakaoLoginLink = page.getByRole('link', {
+            name: /카카오계정으로 로그인/i,
+          });
           if (await kakaoLoginLink.isVisible({ timeout: 3000 })) {
             this.logger.log('카카오계정으로 로그인 링크 클릭');
             await kakaoLoginLink.click();
@@ -357,7 +379,9 @@ export class PlaywrightAuthService {
         // 방법 2: "카카오계정으로 시작하기" 링크 (티스토리 메인 페이지)
         if (!kakaoLoginClicked) {
           try {
-            const kakaoStartLink = page.getByRole('link', { name: /카카오계정으로 시작하기/i });
+            const kakaoStartLink = page.getByRole('link', {
+              name: /카카오계정으로 시작하기/i,
+            });
             if (await kakaoStartLink.isVisible({ timeout: 2000 })) {
               this.logger.log('카카오계정으로 시작하기 링크 클릭');
               await kakaoStartLink.click();
@@ -371,19 +395,28 @@ export class PlaywrightAuthService {
 
         // 방법 3: CSS 셀렉터로 찾기
         if (!kakaoLoginClicked) {
-          const kakaoBtn = await page.$('a[href*="kakao"], button[class*="kakao"], .btn_login_kakao, .link_kakao');
+          const kakaoBtn = await page.$(
+            'a[href*="kakao"], button[class*="kakao"], .btn_login_kakao, .link_kakao',
+          );
           if (kakaoBtn) {
             this.logger.log('카카오 로그인 버튼 클릭 (CSS 셀렉터)');
             try {
               // 페이지 네비게이션을 기다리면서 클릭
               await Promise.all([
-                page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 }).catch(() => {}),
+                page
+                  .waitForNavigation({
+                    waitUntil: 'networkidle',
+                    timeout: 10000,
+                  })
+                  .catch(() => {}),
                 kakaoBtn.click().catch(() => {}),
               ]);
               kakaoLoginClicked = true;
               await page.waitForTimeout(3000);
             } catch (e) {
-              this.logger.warn(`카카오 버튼 클릭 중 오류 (계속 진행): ${e.message}`);
+              this.logger.warn(
+                `카카오 버튼 클릭 중 오류 (계속 진행): ${e.message}`,
+              );
               kakaoLoginClicked = true; // 오류가 발생해도 다음 단계로 진행
               await page.waitForTimeout(3000);
             }
@@ -392,7 +425,10 @@ export class PlaywrightAuthService {
 
         if (!kakaoLoginClicked) {
           this.logger.warn('카카오 로그인 버튼을 찾지 못함');
-          return { success: false, error: '카카오 로그인 버튼을 찾을 수 없습니다.' };
+          return {
+            success: false,
+            error: '카카오 로그인 버튼을 찾을 수 없습니다.',
+          };
         }
       }
 
@@ -404,7 +440,9 @@ export class PlaywrightAuthService {
       // === "간편로그인 정보 저장" 체크박스 활성화 (세션 장기 유지) ===
       try {
         // 방법 1: 체크박스 직접 클릭
-        const saveLoginCheckbox = page.getByRole('checkbox', { name: /간편로그인 정보 저장|로그인 정보 저장|Save Login/i });
+        const saveLoginCheckbox = page.getByRole('checkbox', {
+          name: /간편로그인 정보 저장|로그인 정보 저장|Save Login/i,
+        });
         if (await saveLoginCheckbox.isVisible({ timeout: 2000 })) {
           const isChecked = await saveLoginCheckbox.isChecked();
           if (!isChecked) {
@@ -415,22 +453,26 @@ export class PlaywrightAuthService {
           }
         }
       } catch (e) {
-        this.logger.log(`간편로그인 정보 저장 체크박스 처리 실패 (무시): ${e.message}`);
+        this.logger.log(
+          `간편로그인 정보 저장 체크박스 처리 실패 (무시): ${e.message}`,
+        );
       }
 
       // 카카오 로그인 폼 입력 (2026년 기준 - accounts.kakao.com)
       // 셀렉터: textbox[name="Enter Account Information"], textbox[name="Enter Pa word"]
       // 또는 input 타입으로 찾기
-      
+
       let emailEntered = false;
       let pwEntered = false;
 
       // === 이메일/아이디 입력 ===
       this.logger.log('카카오 계정 정보 입력 중...');
-      
+
       // 방법 1: Playwright getByRole 사용 (정확한 매칭)
       try {
-        const emailTextbox = page.getByRole('textbox', { name: /계정정보 입력|Enter Account Information/i });
+        const emailTextbox = page.getByRole('textbox', {
+          name: /계정정보 입력|Enter Account Information/i,
+        });
         if (await emailTextbox.isVisible({ timeout: 3000 })) {
           await emailTextbox.click();
           await page.waitForTimeout(300);
@@ -484,7 +526,9 @@ export class PlaywrightAuthService {
       // 방법 1: getByRole 사용 (password 필드는 보통 textbox가 아닌 특수 처리 필요)
       try {
         // "비밀번호 입력" 또는 "Enter Pa word" - 카카오 페이지
-        const pwTextbox = page.getByRole('textbox', { name: /비밀번호 입력|Enter Pa|Password/i });
+        const pwTextbox = page.getByRole('textbox', {
+          name: /비밀번호 입력|Enter Pa|Password/i,
+        });
         if (await pwTextbox.isVisible({ timeout: 2000 })) {
           await pwTextbox.click();
           await page.waitForTimeout(300);
@@ -589,54 +633,87 @@ export class PlaywrightAuthService {
       this.logger.log(`로그인 후 URL: ${resultUrl}`);
 
       // 오류 체크
-      const errorElement = await page.$('.error_message, .txt_error, [class*="error"]:not([class*="checkbox"]), .login_error, [class*="Error"]');
+      const errorElement = await page.$(
+        '.error_message, .txt_error, [class*="error"]:not([class*="checkbox"]), .login_error, [class*="Error"]',
+      );
       if (errorElement) {
         const errorText = await errorElement.textContent();
         if (errorText && errorText.trim() && !errorText.includes('checkbox')) {
-          return { success: false, error: errorText?.trim() || '카카오 로그인에 실패했습니다.' };
+          return {
+            success: false,
+            error: errorText?.trim() || '카카오 로그인에 실패했습니다.',
+          };
         }
       }
 
       // 2단계 인증 / 본인 확인 체크
       const twoStepIndicators = [
-        'two-step', '2step', 'twostep',
-        'verify', 'verification',
-        'confirm', 'confirmation',
-        'security', 'authenticate',
-        'passcode', 'otp',
+        'two-step',
+        '2step',
+        'twostep',
+        'verify',
+        'verification',
+        'confirm',
+        'confirmation',
+        'security',
+        'authenticate',
+        'passcode',
+        'otp',
       ];
       const urlLower = resultUrl.toLowerCase();
-      const needsVerification = twoStepIndicators.some(indicator => urlLower.includes(indicator));
-      
+      const needsVerification = twoStepIndicators.some((indicator) =>
+        urlLower.includes(indicator),
+      );
+
       // 페이지 내용에서 본인 확인 관련 텍스트 체크
       const pageText = await page.textContent('body');
       const verificationTexts = [
-        '본인 확인', '본인확인',
-        '인증번호', '인증 번호',
-        '2단계 인증', '2차 인증',
-        '보안 인증', '추가 인증',
-        'verification', 'verify',
+        '본인 확인',
+        '본인확인',
+        '인증번호',
+        '인증 번호',
+        '2단계 인증',
+        '2차 인증',
+        '보안 인증',
+        '추가 인증',
+        'verification',
+        'verify',
       ];
-      const hasVerificationText = verificationTexts.some(text => 
-        pageText && pageText.toLowerCase().includes(text.toLowerCase())
+      const hasVerificationText = verificationTexts.some(
+        (text) =>
+          pageText && pageText.toLowerCase().includes(text.toLowerCase()),
       );
-      
-      if (needsVerification || hasVerificationText || await page.$('.two_step, [class*="two-step"], [class*="twostep"], [class*="verify"], [class*="confirm"]')) {
+
+      if (
+        needsVerification ||
+        hasVerificationText ||
+        (await page.$(
+          '.two_step, [class*="two-step"], [class*="twostep"], [class*="verify"], [class*="confirm"]',
+        ))
+      ) {
         this.logger.warn('2단계 인증/본인 확인 페이지 감지됨');
-        return { 
-          success: false, 
-          error: '카카오 2단계 인증 또는 본인 확인이 필요합니다. 카카오 계정 설정에서 2단계 인증을 해제하거나, 수동 로그인 기능을 사용해주세요.' 
+        return {
+          success: false,
+          error:
+            '카카오 2단계 인증 또는 본인 확인이 필요합니다. 카카오 계정 설정에서 2단계 인증을 해제하거나, 수동 로그인 기능을 사용해주세요.',
         };
       }
 
       // 여전히 카카오 로그인 페이지에 있으면 실패
       if (resultUrl.includes('accounts.kakao.com/login')) {
-        return { success: false, error: '카카오 로그인에 실패했습니다. 아이디/비밀번호를 확인해주세요.' };
+        return {
+          success: false,
+          error:
+            '카카오 로그인에 실패했습니다. 아이디/비밀번호를 확인해주세요.',
+        };
       }
 
       // 티스토리 로그인 페이지에 여전히 있으면 실패
       if (resultUrl.includes('tistory.com/auth/login')) {
-        return { success: false, error: '티스토리 로그인에 실패했습니다. 다시 시도해주세요.' };
+        return {
+          success: false,
+          error: '티스토리 로그인에 실패했습니다. 다시 시도해주세요.',
+        };
       }
 
       // 성공 - 새 쿠키 반환
@@ -661,7 +738,8 @@ export class PlaywrightAuthService {
   ): Promise<AuthResult> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 720 },
     });
     const page = await context.newPage();
@@ -707,22 +785,24 @@ export class PlaywrightAuthService {
 
       // 로그인 성공 여부 확인
       const currentUrl = page.url();
-      
+
       // 캡챠 체크
-      if (currentUrl.includes('captcha') || await page.$('#captcha')) {
+      if (currentUrl.includes('captcha') || (await page.$('#captcha'))) {
         await context.close();
         return {
           success: false,
-          message: '캡챠 인증이 필요합니다. 네이버 웹에서 직접 로그인 후 다시 시도해주세요.',
+          message:
+            '캡챠 인증이 필요합니다. 네이버 웹에서 직접 로그인 후 다시 시도해주세요.',
         };
       }
 
       // 2단계 인증 체크
-      if (currentUrl.includes('auth') || await page.$('.login_second')) {
+      if (currentUrl.includes('auth') || (await page.$('.login_second'))) {
         await context.close();
         return {
           success: false,
-          message: '2단계 인증이 필요합니다. 네이버 앱에서 인증 후 다시 시도해주세요.',
+          message:
+            '2단계 인증이 필요합니다. 네이버 앱에서 인증 후 다시 시도해주세요.',
         };
       }
 
@@ -787,7 +867,8 @@ export class PlaywrightAuthService {
       } else {
         return {
           success: false,
-          message: '블로그 정보를 가져올 수 없습니다. 네이버 블로그가 개설되어 있는지 확인해주세요.',
+          message:
+            '블로그 정보를 가져올 수 없습니다. 네이버 블로그가 개설되어 있는지 확인해주세요.',
         };
       }
     } catch (error) {
@@ -809,7 +890,8 @@ export class PlaywrightAuthService {
   ): Promise<AuthResult> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 720 },
     });
     const page = await context.newPage();
@@ -834,7 +916,7 @@ export class PlaywrightAuthService {
         '.btn_login_kakao',
         '[class*="kakao"]',
       ];
-      
+
       let kakaoClicked = false;
       for (const selector of kakaoLoginSelectors) {
         try {
@@ -860,14 +942,18 @@ export class PlaywrightAuthService {
 
       // 카카오 로그인 페이지 로딩 대기
       await page.waitForTimeout(3000);
-      
+
       let currentUrl = page.url();
       this.logger.log(`카카오 로그인 페이지 URL: ${currentUrl}`);
 
       // === "로그인 정보 저장" 체크박스 활성화 (세션 장기 유지) ===
       // 카카오 로그인 페이지에서 label이 checkbox를 덮고 있으므로 label을 클릭
       try {
-        const saveLoginLabel = page.locator('label[for*="saveSignedIn"], label:has-text("로그인 정보 저장"), label:has-text("Save Login")').first();
+        const saveLoginLabel = page
+          .locator(
+            'label[for*="saveSignedIn"], label:has-text("로그인 정보 저장"), label:has-text("Save Login")',
+          )
+          .first();
         if (await saveLoginLabel.isVisible({ timeout: 2000 })) {
           await saveLoginLabel.click({ timeout: 3000 });
           this.logger.log('로그인 정보 저장 체크박스 활성화 (label 클릭)');
@@ -875,14 +961,18 @@ export class PlaywrightAuthService {
       } catch (e) {
         try {
           await page.evaluate(() => {
-            const checkbox = document.querySelector('input[name="saveSignedIn"], input#saveSignedIn') as HTMLInputElement;
+            const checkbox = document.querySelector(
+              'input[name="saveSignedIn"], input#saveSignedIn',
+            ) as HTMLInputElement;
             if (checkbox && !checkbox.checked) {
               checkbox.click();
             }
           });
           this.logger.log('로그인 정보 저장 체크박스 활성화 (JavaScript)');
         } catch (e2) {
-          this.logger.log(`로그인 정보 저장 체크박스 처리 실패 (무시): ${e.message}`);
+          this.logger.log(
+            `로그인 정보 저장 체크박스 처리 실패 (무시): ${e.message}`,
+          );
         }
       }
 
@@ -892,20 +982,24 @@ export class PlaywrightAuthService {
       // - 비밀번호: textbox "Enter Pa word" (Password에서 ss 잘림) 또는 input[type="password"]
       // - 로그인 버튼: button "Log In"
       this.logger.log('카카오 계정 정보 입력 중...');
-      
+
       let emailEntered = false;
       let pwEntered = false;
 
       // === 이메일/아이디 입력 ===
       // 방법 1: Playwright getByRole 사용
       try {
-        const emailTextbox = page.getByRole('textbox', { name: /Enter Account Information/i });
+        const emailTextbox = page.getByRole('textbox', {
+          name: /Enter Account Information/i,
+        });
         if (await emailTextbox.isVisible({ timeout: 3000 })) {
           await emailTextbox.click();
           await page.waitForTimeout(300);
           await emailTextbox.fill(username);
           emailEntered = true;
-          this.logger.log('이메일 입력 성공: getByRole("Enter Account Information")');
+          this.logger.log(
+            '이메일 입력 성공: getByRole("Enter Account Information")',
+          );
         }
       } catch (e) {
         this.logger.log(`이메일 getByRole 시도 실패: ${e.message}`);
@@ -921,11 +1015,11 @@ export class PlaywrightAuthService {
           'input[placeholder*="Account"]',
           'input[type="text"]:first-of-type',
         ];
-        
+
         for (const selector of emailSelectors) {
           try {
             const input = await page.$(selector);
-            if (input && await input.isVisible()) {
+            if (input && (await input.isVisible())) {
               await input.click();
               await page.waitForTimeout(300);
               await input.fill(username);
@@ -944,7 +1038,9 @@ export class PlaywrightAuthService {
       // === 비밀번호 입력 ===
       // 방법 1: getByRole 사용
       try {
-        const pwTextbox = page.getByRole('textbox', { name: /Enter Pa|Password/i });
+        const pwTextbox = page.getByRole('textbox', {
+          name: /Enter Pa|Password/i,
+        });
         if (await pwTextbox.isVisible({ timeout: 2000 })) {
           await pwTextbox.click();
           await page.waitForTimeout(300);
@@ -965,11 +1061,11 @@ export class PlaywrightAuthService {
           'input[placeholder*="비밀번호"]',
           'input[placeholder*="Password"]',
         ];
-        
+
         for (const selector of pwSelectors) {
           try {
             const input = await page.$(selector);
-            if (input && await input.isVisible()) {
+            if (input && (await input.isVisible())) {
               await input.click();
               await page.waitForTimeout(300);
               await input.fill(password);
@@ -1017,11 +1113,11 @@ export class PlaywrightAuthService {
           '.submit',
           'input[type="submit"]',
         ];
-        
+
         for (const selector of loginBtnSelectors) {
           try {
             const btn = await page.$(selector);
-            if (btn && await btn.isVisible()) {
+            if (btn && (await btn.isVisible())) {
               await btn.click();
               loginClicked = true;
               this.logger.log(`로그인 버튼 클릭 성공: ${selector}`);
@@ -1046,7 +1142,12 @@ export class PlaywrightAuthService {
       this.logger.log(`로그인 후 URL: ${currentUrl}`);
 
       // 오류 체크
-      const errorSelectors = ['.error_message', '.txt_error', '[class*="error"]', '[class*="Error"]'];
+      const errorSelectors = [
+        '.error_message',
+        '.txt_error',
+        '[class*="error"]',
+        '[class*="Error"]',
+      ];
       for (const selector of errorSelectors) {
         const errorElement = await page.$(selector);
         if (errorElement) {
@@ -1062,12 +1163,16 @@ export class PlaywrightAuthService {
       }
 
       // 2단계 인증 체크 (카카오톡 인증)
-      if (currentUrl.includes('accounts.kakao') && !currentUrl.includes('tistory')) {
+      if (
+        currentUrl.includes('accounts.kakao') &&
+        !currentUrl.includes('tistory')
+      ) {
         // 아직 카카오 로그인 페이지에 있으면 인증 대기 중일 수 있음
         await context.close();
         return {
           success: false,
-          message: '카카오 로그인에 실패했거나 2단계 인증이 필요합니다. 카카오톡에서 인증 후 다시 시도해주세요.',
+          message:
+            '카카오 로그인에 실패했거나 2단계 인증이 필요합니다. 카카오톡에서 인증 후 다시 시도해주세요.',
         };
       }
 
@@ -1080,7 +1185,7 @@ export class PlaywrightAuthService {
       });
 
       await page.waitForTimeout(3000);
-      
+
       const mainUrl = page.url();
       this.logger.log(`티스토리 메인 URL: ${mainUrl}`);
 
@@ -1092,19 +1197,23 @@ export class PlaywrightAuthService {
       try {
         // 계정정보 레이어 열기 버튼 클릭
         this.logger.log('계정정보 레이어 열기...');
-        const accountBtn = await page.$('button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]');
+        const accountBtn = await page.$(
+          'button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]',
+        );
         if (accountBtn) {
           await accountBtn.click();
           await page.waitForTimeout(2000);
           this.logger.log('계정정보 레이어 열림');
-          
+
           // "운영중인 블로그" 섹션에서 블로그 정보 추출
           // 구조: heading "운영중인 블로그" 아래에 블로그 링크들이 있음
           // link "re-rank 님의 블로그" [href="https://re-rank.tistory.com"]
           // link "쓰기" [href="https://re-rank.tistory.com/manage/post"]
-          
+
           // 방법 1: "님의 블로그" 링크에서 추출 (가장 정확)
-          const myBlogLink = await page.$('a[href*=".tistory.com"]:has-text("님의 블로그")');
+          const myBlogLink = await page.$(
+            'a[href*=".tistory.com"]:has-text("님의 블로그")',
+          );
           if (myBlogLink) {
             const href = await myBlogLink.getAttribute('href');
             const text = await myBlogLink.textContent();
@@ -1120,10 +1229,12 @@ export class PlaywrightAuthService {
               blogName = text.trim().replace(' 님의 블로그', '');
             }
           }
-          
+
           // 방법 2: "쓰기" 링크에서 추출
           if (!blogId) {
-            const writeLink = await page.$('a[href*="/manage/post"], a[href*="/manage/newpost"]');
+            const writeLink = await page.$(
+              'a[href*="/manage/post"], a[href*="/manage/newpost"]',
+            );
             if (writeLink) {
               const href = await writeLink.getAttribute('href');
               if (href) {
@@ -1136,14 +1247,13 @@ export class PlaywrightAuthService {
               }
             }
           }
-          
+
           // ESC로 레이어 닫기
           await page.keyboard.press('Escape');
           await page.waitForTimeout(500);
         } else {
           this.logger.warn('계정정보 레이어 버튼을 찾지 못함');
         }
-
       } catch (e) {
         this.logger.warn(`블로그 정보 추출 중 오류: ${e.message}`);
       }
@@ -1155,7 +1265,7 @@ export class PlaywrightAuthService {
           blogId = idMatch[1];
         }
       }
-      
+
       // blogId로 blogUrl 생성
       if (blogId && !blogUrl) {
         blogUrl = `https://${blogId}.tistory.com`;
@@ -1173,7 +1283,8 @@ export class PlaywrightAuthService {
           message: '티스토리 연동 성공',
           accountInfo: {
             name: blogName || blogId || username,
-            url: blogUrl || (blogId ? `https://${blogId}.tistory.com` : undefined),
+            url:
+              blogUrl || (blogId ? `https://${blogId}.tistory.com` : undefined),
             blogId,
           },
           cookies: cookieString,
@@ -1181,10 +1292,13 @@ export class PlaywrightAuthService {
       } else {
         // 로그인은 성공했지만 블로그 정보를 못 가져온 경우에도 성공 처리
         // 사용자가 직접 블로그 URL을 입력할 수 있도록 함
-        this.logger.warn('블로그 정보를 자동으로 가져오지 못했습니다. 쿠키는 저장됨.');
+        this.logger.warn(
+          '블로그 정보를 자동으로 가져오지 못했습니다. 쿠키는 저장됨.',
+        );
         return {
           success: true,
-          message: '티스토리 로그인 성공 (블로그 정보를 자동으로 가져오지 못했습니다. 블로그 URL을 직접 입력해주세요.)',
+          message:
+            '티스토리 로그인 성공 (블로그 정보를 자동으로 가져오지 못했습니다. 블로그 URL을 직접 입력해주세요.)',
           accountInfo: {
             name: username,
           },
@@ -1232,7 +1346,13 @@ export class PlaywrightAuthService {
     title: string,
     content: string,
     credentials?: { username: string; password: string },
-  ): Promise<{ success: boolean; postId?: string; postUrl?: string; error?: string; newCookies?: string }> {
+  ): Promise<{
+    success: boolean;
+    postId?: string;
+    postUrl?: string;
+    error?: string;
+    newCookies?: string;
+  }> {
     // 발행 전용 새 브라우저 생성 (서버리스 환경 안정성)
     let browser: Browser | null = null;
     let context: BrowserContext | null = null;
@@ -1240,7 +1360,8 @@ export class PlaywrightAuthService {
     try {
       browser = await this.createFreshBrowser();
       context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 900 },
       });
 
@@ -1249,7 +1370,7 @@ export class PlaywrightAuthService {
       this.logger.log(`쿠키 파싱 완료: ${cookieArray.length}개 쿠키`);
       await context.addCookies(cookieArray);
 
-      let page = await context.newPage();
+      const page = await context.newPage();
       this.logger.log('네이버 블로그 글쓰기 페이지 접속 중...');
 
       // 글쓰기 페이지로 이동 - 새 글쓰기 URL 사용
@@ -1268,10 +1389,18 @@ export class PlaywrightAuthService {
       // 로그인 확인 - 세션 만료 시 자동 재로그인 시도
       if (currentUrl.includes('nidlogin') || currentUrl.includes('login')) {
         this.logger.log('세션이 만료됨. 자동 재로그인 시도 중...');
-        
+
         if (!credentials?.username || !credentials?.password) {
-          try { await context?.close(); } catch { /* ignore */ }
-          try { await browser?.close(); } catch { /* ignore */ }
+          try {
+            await context?.close();
+          } catch {
+            /* ignore */
+          }
+          try {
+            await browser?.close();
+          } catch {
+            /* ignore */
+          }
           return {
             success: false,
             error: '세션이 만료되었습니다. 매체 연동을 다시 테스트해주세요.',
@@ -1279,11 +1408,23 @@ export class PlaywrightAuthService {
         }
 
         // 재로그인 시도
-        const reloginResult = await this.performNaverLogin(page, credentials.username, credentials.password);
+        const reloginResult = await this.performNaverLogin(
+          page,
+          credentials.username,
+          credentials.password,
+        );
 
         if (!reloginResult.success) {
-          try { await context?.close(); } catch { /* ignore */ }
-          try { await browser?.close(); } catch { /* ignore */ }
+          try {
+            await context?.close();
+          } catch {
+            /* ignore */
+          }
+          try {
+            await browser?.close();
+          } catch {
+            /* ignore */
+          }
           return {
             success: false,
             error: `재로그인 실패: ${reloginResult.error}`,
@@ -1303,11 +1444,20 @@ export class PlaywrightAuthService {
         this.logger.log(`재로그인 후 URL: ${currentUrl}`);
 
         if (currentUrl.includes('nidlogin') || currentUrl.includes('login')) {
-          try { await context?.close(); } catch { /* ignore */ }
-          try { await browser?.close(); } catch { /* ignore */ }
+          try {
+            await context?.close();
+          } catch {
+            /* ignore */
+          }
+          try {
+            await browser?.close();
+          } catch {
+            /* ignore */
+          }
           return {
             success: false,
-            error: '재로그인 후에도 세션이 유지되지 않습니다. 계정을 확인해주세요.',
+            error:
+              '재로그인 후에도 세션이 유지되지 않습니다. 계정을 확인해주세요.',
           };
         }
 
@@ -1345,23 +1495,27 @@ export class PlaywrightAuthService {
 
       // "작성 중인 글이 있습니다" 팝업 처리 및 다른 팝업 닫기
       this.logger.log('팝업 처리 중...');
-      
+
       const iframeLocator = page.frameLocator('iframe').first();
-      
+
       // 1. 임시저장 팝업 확인 및 "새로 작성" 클릭 (기존 임시저장 글 불러오기 방지)
       try {
         // 팝업이 표시되기를 잠시 대기
         await page.waitForTimeout(2000);
-        
+
         // iframe 내에서 "새로 작성" 버튼 우선 클릭 (임시저장 글 불러오기 대신 새로 작성)
-        const newWriteBtn = iframeLocator.locator('button:has-text("새로 작성")').first();
+        const newWriteBtn = iframeLocator
+          .locator('button:has-text("새로 작성")')
+          .first();
         if (await newWriteBtn.isVisible({ timeout: 3000 })) {
           await newWriteBtn.click();
           this.logger.log('임시저장 팝업에서 "새로 작성" 클릭');
           await page.waitForTimeout(2000);
         } else {
           // "새로 작성" 버튼이 없으면 취소 버튼 클릭
-          const cancelBtn = iframeLocator.locator('button:has-text("취소")').first();
+          const cancelBtn = iframeLocator
+            .locator('button:has-text("취소")')
+            .first();
           if (await cancelBtn.isVisible({ timeout: 1000 })) {
             await cancelBtn.click();
             this.logger.log('임시저장 팝업에서 "취소" 클릭');
@@ -1371,7 +1525,7 @@ export class PlaywrightAuthService {
       } catch {
         this.logger.log('임시저장 팝업 없음 (정상)');
       }
-      
+
       // 2. 확인 팝업 (se-popup-alert-confirm) 처리
       try {
         // 확인/닫기 버튼 찾기
@@ -1399,7 +1553,11 @@ export class PlaywrightAuthService {
 
       // 3. 도움말 팝업이나 기타 팝업 닫기
       try {
-        const closeBtn = iframeLocator.locator('.se-help-close, button[aria-label="닫기"], [class*="close"]').first();
+        const closeBtn = iframeLocator
+          .locator(
+            '.se-help-close, button[aria-label="닫기"], [class*="close"]',
+          )
+          .first();
         if (await closeBtn.isVisible({ timeout: 1000 })) {
           await closeBtn.click();
           this.logger.log('도움말/기타 팝업 닫음');
@@ -1411,8 +1569,14 @@ export class PlaywrightAuthService {
 
       // 4. se-popup-dim (팝업 오버레이) 강제 제거
       try {
-        await iframeLocator.locator('.se-popup-dim').evaluate((el: Element) => el.remove()).catch(() => {});
-        await iframeLocator.locator('.se-popup-alert').evaluate((el: Element) => el.remove()).catch(() => {});
+        await iframeLocator
+          .locator('.se-popup-dim')
+          .evaluate((el: Element) => el.remove())
+          .catch(() => {});
+        await iframeLocator
+          .locator('.se-popup-alert')
+          .evaluate((el: Element) => el.remove())
+          .catch(() => {});
         this.logger.log('팝업 오버레이 제거 시도');
       } catch {
         // 무시
@@ -1427,21 +1591,37 @@ export class PlaywrightAuthService {
       // === 키보드 타이핑 방식으로 제목/본문 입력 ===
       // 네이버 SmartEditor ONE은 DOM 직접 수정을 인식하지 않음
       // 반드시 실제 키보드 입력을 사용해야 함
-      
+
       // iframe 핸들 가져오기
       const iframeHandle = await page.$('iframe');
       if (!iframeHandle) {
-        try { await context?.close(); } catch { /* ignore */ }
-        try { await browser?.close(); } catch { /* ignore */ }
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
         return { success: false, error: '에디터 iframe을 찾을 수 없습니다.' };
       }
       const frame = await iframeHandle.contentFrame();
       if (!frame) {
-        try { await context?.close(); } catch { /* ignore */ }
-        try { await browser?.close(); } catch { /* ignore */ }
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
         return { success: false, error: '에디터 프레임에 접근할 수 없습니다.' };
       }
-      
+
       // 제목 영역 찾기 - 네이버 SmartEditor ONE의 제목 영역
       this.logger.log('제목 입력 중...');
       try {
@@ -1457,7 +1637,9 @@ export class PlaywrightAuthService {
         for (const selector of titleSelectors) {
           try {
             // 타임아웃 5초로 대기
-            const titleEl = await frame.waitForSelector(selector, { timeout: 5000 }).catch(() => null);
+            const titleEl = await frame
+              .waitForSelector(selector, { timeout: 5000 })
+              .catch(() => null);
             if (titleEl) {
               await titleEl.click();
               titleClicked = true;
@@ -1472,7 +1654,9 @@ export class PlaywrightAuthService {
         if (!titleClicked) {
           this.logger.log('제목 셀렉터 실패, article p 시도...');
           // 대안: 첫 번째 p 태그 클릭
-          const firstP = await frame.waitForSelector('article p', { timeout: 5000 }).catch(() => null);
+          const firstP = await frame
+            .waitForSelector('article p', { timeout: 5000 })
+            .catch(() => null);
           if (firstP) {
             await firstP.click();
             this.logger.log('제목 영역 클릭 성공 (article p)');
@@ -1483,9 +1667,9 @@ export class PlaywrightAuthService {
       } catch (e) {
         this.logger.warn(`제목 영역 클릭 실패: ${e.message}`);
       }
-      
+
       await page.waitForTimeout(500);
-      
+
       // 기존 텍스트 삭제 (Ctrl+A로 전체 선택 후 삭제)
       await page.keyboard.press('Control+A');
       await page.waitForTimeout(200);
@@ -1496,7 +1680,9 @@ export class PlaywrightAuthService {
       try {
         await frame.evaluate(() => {
           // 1. 모든 활성화된 서식 버튼 해제
-          const activeButtons = document.querySelectorAll('[class*="se-toolbar"] button[aria-pressed="true"]');
+          const activeButtons = document.querySelectorAll(
+            '[class*="se-toolbar"] button[aria-pressed="true"]',
+          );
           activeButtons.forEach((btn: Element) => {
             (btn as HTMLButtonElement).click();
           });
@@ -1511,12 +1697,15 @@ export class PlaywrightAuthService {
           ];
 
           for (const selector of strikeSelectors) {
-            const strikeBtn = document.querySelector(selector) as HTMLButtonElement;
+            const strikeBtn = document.querySelector(
+              selector,
+            ) as HTMLButtonElement;
             if (strikeBtn) {
               // aria-pressed 상태 확인
-              const isPressed = strikeBtn.getAttribute('aria-pressed') === 'true' ||
-                               strikeBtn.classList.contains('active') ||
-                               strikeBtn.classList.contains('se-toolbar-button-active');
+              const isPressed =
+                strikeBtn.getAttribute('aria-pressed') === 'true' ||
+                strikeBtn.classList.contains('active') ||
+                strikeBtn.classList.contains('se-toolbar-button-active');
               if (isPressed) {
                 strikeBtn.click();
               }
@@ -1525,10 +1714,22 @@ export class PlaywrightAuthService {
           }
 
           // 3. 볼드, 이탤릭, 밑줄, 취소선 버튼 모두 확인하여 비활성화
-          const formatNames = ['bold', 'italic', 'underline', 'strike', 'strikethrough'];
-          formatNames.forEach(name => {
-            const btn = document.querySelector(`button[data-name="${name}"]`) as HTMLButtonElement;
-            if (btn && (btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('active'))) {
+          const formatNames = [
+            'bold',
+            'italic',
+            'underline',
+            'strike',
+            'strikethrough',
+          ];
+          formatNames.forEach((name) => {
+            const btn = document.querySelector(
+              `button[data-name="${name}"]`,
+            ) as HTMLButtonElement;
+            if (
+              btn &&
+              (btn.getAttribute('aria-pressed') === 'true' ||
+                btn.classList.contains('active'))
+            ) {
               btn.click();
             }
           });
@@ -1538,15 +1739,15 @@ export class PlaywrightAuthService {
         this.logger.log(`서식 초기화 시도: ${e.message}`);
       }
       await page.waitForTimeout(300);
-      
+
       // 제목 타이핑
       await page.keyboard.type(title, { delay: 30 });
       this.logger.log('제목 입력 완료');
-      
+
       // 본문 영역으로 이동 - 본문 영역을 직접 클릭
       this.logger.log('본문 영역으로 이동 중...');
       await page.waitForTimeout(500);
-      
+
       try {
         // 본문 영역 직접 클릭
         const bodySelectors = [
@@ -1555,7 +1756,7 @@ export class PlaywrightAuthService {
           'article.se-text:not(.se-title) p',
           '.se-contents .se-text-paragraph',
         ];
-        
+
         let bodyClicked = false;
         for (const selector of bodySelectors) {
           try {
@@ -1570,7 +1771,7 @@ export class PlaywrightAuthService {
             continue;
           }
         }
-        
+
         if (!bodyClicked) {
           // 대안: Tab 키로 이동
           await page.keyboard.press('Tab');
@@ -1580,9 +1781,9 @@ export class PlaywrightAuthService {
         this.logger.warn(`본문 영역 클릭 실패, Tab 사용: ${e.message}`);
         await page.keyboard.press('Tab');
       }
-      
+
       await page.waitForTimeout(500);
-      
+
       // 본문 영역의 서식도 초기화
       await page.keyboard.press('Control+A');
       await page.waitForTimeout(100);
@@ -1593,7 +1794,9 @@ export class PlaywrightAuthService {
       try {
         await frame.evaluate(() => {
           // 1. 모든 활성화된 서식 버튼 해제
-          const activeButtons = document.querySelectorAll('[class*="se-toolbar"] button[aria-pressed="true"]');
+          const activeButtons = document.querySelectorAll(
+            '[class*="se-toolbar"] button[aria-pressed="true"]',
+          );
           activeButtons.forEach((btn: Element) => {
             (btn as HTMLButtonElement).click();
           });
@@ -1608,11 +1811,14 @@ export class PlaywrightAuthService {
           ];
 
           for (const selector of strikeSelectors) {
-            const strikeBtn = document.querySelector(selector) as HTMLButtonElement;
+            const strikeBtn = document.querySelector(
+              selector,
+            ) as HTMLButtonElement;
             if (strikeBtn) {
-              const isPressed = strikeBtn.getAttribute('aria-pressed') === 'true' ||
-                               strikeBtn.classList.contains('active') ||
-                               strikeBtn.classList.contains('se-toolbar-button-active');
+              const isPressed =
+                strikeBtn.getAttribute('aria-pressed') === 'true' ||
+                strikeBtn.classList.contains('active') ||
+                strikeBtn.classList.contains('se-toolbar-button-active');
               if (isPressed) {
                 strikeBtn.click();
               }
@@ -1621,10 +1827,22 @@ export class PlaywrightAuthService {
           }
 
           // 3. 볼드, 이탤릭, 밑줄, 취소선 버튼 모두 확인하여 비활성화
-          const formatNames = ['bold', 'italic', 'underline', 'strike', 'strikethrough'];
-          formatNames.forEach(name => {
-            const btn = document.querySelector(`button[data-name="${name}"]`) as HTMLButtonElement;
-            if (btn && (btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('active'))) {
+          const formatNames = [
+            'bold',
+            'italic',
+            'underline',
+            'strike',
+            'strikethrough',
+          ];
+          formatNames.forEach((name) => {
+            const btn = document.querySelector(
+              `button[data-name="${name}"]`,
+            ) as HTMLButtonElement;
+            if (
+              btn &&
+              (btn.getAttribute('aria-pressed') === 'true' ||
+                btn.classList.contains('active'))
+            ) {
               btn.click();
             }
           });
@@ -1691,12 +1909,13 @@ export class PlaywrightAuthService {
             const btn = document.querySelector(selector) as HTMLButtonElement;
             if (btn) {
               // 다양한 방법으로 활성화 상태 확인
-              const isActive = btn.getAttribute('aria-pressed') === 'true' ||
-                              btn.classList.contains('active') ||
-                              btn.classList.contains('se-toolbar-button-active') ||
-                              btn.classList.contains('is-active') ||
-                              btn.classList.contains('on') ||
-                              btn.getAttribute('data-active') === 'true';
+              const isActive =
+                btn.getAttribute('aria-pressed') === 'true' ||
+                btn.classList.contains('active') ||
+                btn.classList.contains('se-toolbar-button-active') ||
+                btn.classList.contains('is-active') ||
+                btn.classList.contains('on') ||
+                btn.getAttribute('data-active') === 'true';
 
               if (isActive) {
                 btn.click();
@@ -1726,7 +1945,7 @@ export class PlaywrightAuthService {
           await page.waitForTimeout(30);
         }
       }
-      
+
       // 링크가 있으면 본문 마지막에 URL을 직접 추가
       // (네이버가 URL을 자동으로 링크로 변환함)
       if (links.length > 0) {
@@ -1735,29 +1954,31 @@ export class PlaywrightAuthService {
         await page.keyboard.press('Enter');
         await page.keyboard.type('▶ 관련 링크:', { delay: 20 });
         await page.keyboard.press('Enter');
-        
+
         for (const link of links) {
-          await page.keyboard.type(`${link.anchorText}: ${link.url}`, { delay: 15 });
+          await page.keyboard.type(`${link.anchorText}: ${link.url}`, {
+            delay: 15,
+          });
           await page.keyboard.press('Enter');
           this.logger.log(`링크 추가: ${link.anchorText} -> ${link.url}`);
         }
       }
-      
+
       this.logger.log('제목/본문 입력 완료');
       await page.waitForTimeout(1500);
 
       // 발행 버튼 클릭 - 상단 헤더의 "발행" 버튼
       this.logger.log('발행 버튼 클릭 중...');
-      
+
       let publishClicked = false;
-      
+
       // JavaScript로 발행 버튼 찾아서 클릭
       try {
         publishClicked = await page.evaluate(() => {
           const iframe = document.querySelector('iframe') as HTMLIFrameElement;
           if (!iframe?.contentDocument) return false;
           const doc = iframe.contentDocument;
-          
+
           // 발행 버튼 찾기 - 다양한 선택자 시도
           const selectors = [
             'button[data-click-area="tpb.publish"]',
@@ -1765,7 +1986,7 @@ export class PlaywrightAuthService {
             'button:has(.se-icon-publish)',
             'header button:has-text("발행")',
           ];
-          
+
           for (const selector of selectors) {
             try {
               const btn = doc.querySelector(selector) as HTMLButtonElement;
@@ -1777,33 +1998,39 @@ export class PlaywrightAuthService {
               continue;
             }
           }
-          
+
           // 텍스트로 찾기
           const buttons = Array.from(doc.querySelectorAll('button'));
           for (const btn of buttons) {
             const text = btn.textContent?.trim();
             // "발행" 텍스트가 있고, "예약발행"이 아닌 버튼
-            if (text === '발행' || (text?.includes('발행') && !text?.includes('예약'))) {
+            if (
+              text === '발행' ||
+              (text?.includes('발행') && !text?.includes('예약'))
+            ) {
               (btn as HTMLButtonElement).click();
               return true;
             }
           }
-          
+
           return false;
         });
-        
+
         if (publishClicked) {
           this.logger.log('발행 버튼 클릭 성공 (JavaScript)');
         }
       } catch (e) {
         this.logger.error(`발행 버튼 JavaScript 클릭 실패: ${e.message}`);
       }
-      
+
       // JavaScript 클릭 실패 시 Playwright locator 사용
       if (!publishClicked) {
         try {
           const iframeLocator = page.frameLocator('iframe').first();
-          const publishBtn = iframeLocator.locator('button').filter({ hasText: /^발행$/ }).first();
+          const publishBtn = iframeLocator
+            .locator('button')
+            .filter({ hasText: /^발행$/ })
+            .first();
           await publishBtn.click({ timeout: 5000, force: true });
           publishClicked = true;
           this.logger.log('발행 버튼 클릭 성공 (Playwright locator)');
@@ -1822,9 +2049,11 @@ export class PlaywrightAuthService {
           const iframe = document.querySelector('iframe') as HTMLIFrameElement;
           if (!iframe?.contentDocument) return;
           const doc = iframe.contentDocument;
-          
+
           // 모달 내 발행 버튼 찾기 - 보통 모달의 확인 버튼
-          const modalBtns = doc.querySelectorAll('.se-popup button, [class*="modal"] button, [class*="layer"] button');
+          const modalBtns = doc.querySelectorAll(
+            '.se-popup button, [class*="modal"] button, [class*="layer"] button',
+          );
           for (const btn of Array.from(modalBtns)) {
             const text = btn.textContent?.trim();
             if (text === '발행' || text === '확인') {
@@ -1832,10 +2061,12 @@ export class PlaywrightAuthService {
               return;
             }
           }
-          
+
           // 일반 버튼 중 마지막 "발행" 버튼
           const allBtns = doc.querySelectorAll('button');
-          const publishBtns = Array.from(allBtns).filter(btn => btn.textContent?.trim() === '발행');
+          const publishBtns = Array.from(allBtns).filter(
+            (btn) => btn.textContent?.trim() === '발행',
+          );
           if (publishBtns.length > 1) {
             (publishBtns[publishBtns.length - 1] as HTMLButtonElement).click();
           }
@@ -1850,9 +2081,11 @@ export class PlaywrightAuthService {
       try {
         await page.waitForTimeout(7000);
       } catch (e) {
-        this.logger.log('발행 후 페이지 대기 중 오류 (정상적인 리디렉션일 수 있음)');
+        this.logger.log(
+          '발행 후 페이지 대기 중 오류 (정상적인 리디렉션일 수 있음)',
+        );
       }
-      
+
       // 결과 확인 - 페이지가 닫혔을 수 있으므로 try-catch
       let finalUrl = '';
       try {
@@ -1863,40 +2096,49 @@ export class PlaywrightAuthService {
         finalUrl = '';
       }
       this.logger.log(`발행 후 URL: ${finalUrl}`);
-      
+
       // 블로그 ID 추출
       let blogId = '';
-      const blogIdMatch = finalUrl.match(/blogId=([^&]+)/) || finalUrl.match(/blog\.naver\.com\/([^/?]+)/);
+      const blogIdMatch =
+        finalUrl.match(/blogId=([^&]+)/) ||
+        finalUrl.match(/blog\.naver\.com\/([^/?]+)/);
       if (blogIdMatch) {
         blogId = blogIdMatch[1];
       }
       if (!blogId) blogId = 're-rank'; // 기본값
-      
+
       // 포스트 ID 추출 시도
       let postId = '';
       const postIdMatch = finalUrl.match(/logNo=(\d+)/);
       if (postIdMatch) {
         postId = postIdMatch[1];
       }
-      
+
       // 글쓰기 페이지를 벗어났으면 성공
-      const publishSuccess = !finalUrl.includes('Write') && !finalUrl.includes('Redirect');
-      
+      const publishSuccess =
+        !finalUrl.includes('Write') && !finalUrl.includes('Redirect');
+
       // 발행 성공했지만 postId를 못 찾은 경우, 새 페이지로 블로그 홈에서 최신 글 확인
       if (!postId && blogId) {
         this.logger.log('포스트 ID를 찾을 수 없어 블로그 홈에서 확인 중...');
-        
+
         // 새 페이지 생성 (기존 페이지가 닫혔을 수 있음)
         const newPage = await context.newPage();
         try {
-          await newPage.goto(`https://blog.naver.com/PostList.naver?blogId=${blogId}`, {
-            waitUntil: 'networkidle',
-            timeout: 30000,
-          });
+          await newPage.goto(
+            `https://blog.naver.com/PostList.naver?blogId=${blogId}`,
+            {
+              waitUntil: 'networkidle',
+              timeout: 30000,
+            },
+          );
           await newPage.waitForTimeout(2000);
-          
+
           // 최신 글 URL 가져오기
-          const latestPostLink = await newPage.locator('a[href*="logNo="]').first().getAttribute('href');
+          const latestPostLink = await newPage
+            .locator('a[href*="logNo="]')
+            .first()
+            .getAttribute('href');
           if (latestPostLink) {
             const latestPostIdMatch = latestPostLink.match(/logNo=(\d+)/);
             if (latestPostIdMatch) {
@@ -1910,8 +2152,8 @@ export class PlaywrightAuthService {
           await newPage.close();
         }
       }
-      
-      const postUrl = postId 
+
+      const postUrl = postId
         ? `https://blog.naver.com/${blogId}/${postId}`
         : finalUrl;
 
@@ -1925,8 +2167,16 @@ export class PlaywrightAuthService {
       }
 
       // 정리: 컨텍스트와 브라우저 모두 종료
-      try { await context?.close(); } catch { /* ignore */ }
-      try { await browser?.close(); } catch { /* ignore */ }
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
 
       if (publishSuccess || postId) {
         this.logger.log(`네이버 블로그 발행 완료: ${postUrl}`);
@@ -1940,15 +2190,24 @@ export class PlaywrightAuthService {
         this.logger.warn('발행 완료 여부를 확인할 수 없음 - 수동 확인 필요');
         return {
           success: false,
-          error: '발행이 완료되었는지 확인할 수 없습니다. 네이버 블로그에서 직접 확인해주세요.',
+          error:
+            '발행이 완료되었는지 확인할 수 없습니다. 네이버 블로그에서 직접 확인해주세요.',
           postUrl: finalUrl,
           newCookies,
         };
       }
     } catch (error) {
       // 정리: 컨텍스트와 브라우저 모두 종료
-      try { await context?.close(); } catch { /* ignore */ }
-      try { await browser?.close(); } catch { /* ignore */ }
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
       this.logger.error(`네이버 블로그 발행 오류: ${error.message}`);
       return {
         success: false,
@@ -1959,7 +2218,7 @@ export class PlaywrightAuthService {
 
   /**
    * 티스토리에 글 발행 (2024년 에디터 분석 기반)
-   * 
+   *
    * 티스토리 글쓰기 페이지 구조:
    * - URL: https://{블로그이름}.tistory.com/manage/newpost
    * - 제목: textbox[placeholder="제목을 입력하세요"]
@@ -1973,7 +2232,13 @@ export class PlaywrightAuthService {
     password: string | undefined,
     title: string,
     content: string,
-  ): Promise<{ success: boolean; postId?: string; postUrl?: string; error?: string; newCookies?: string }> {
+  ): Promise<{
+    success: boolean;
+    postId?: string;
+    postUrl?: string;
+    error?: string;
+    newCookies?: string;
+  }> {
     // 발행 전용 새 브라우저 생성 (서버리스 환경 안정성)
     let browser: Browser | null = null;
     let context: BrowserContext | null = null;
@@ -1981,7 +2246,8 @@ export class PlaywrightAuthService {
     try {
       browser = await this.createFreshBrowser();
       context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        userAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 900 },
       });
 
@@ -1993,7 +2259,7 @@ export class PlaywrightAuthService {
       await context.addCookies(cookieArray);
 
       const page = await context.newPage();
-      
+
       // 블로그 URL에서 블로그명 추출 - 티스토리는 블로그명이 필수
       let blogName = '';
       const blogNameMatch = blogUrl?.match(/https?:\/\/([^.]+)\.tistory\.com/);
@@ -2002,11 +2268,20 @@ export class PlaywrightAuthService {
       }
 
       if (!blogName) {
-        try { await context?.close(); } catch { /* ignore */ }
-        try { await browser?.close(); } catch { /* ignore */ }
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
         return {
           success: false,
-          error: '티스토리 블로그 URL이 필요합니다. 매체 연동에서 블로그 URL(예: https://myblog.tistory.com)을 확인해주세요.',
+          error:
+            '티스토리 블로그 URL이 필요합니다. 매체 연동에서 블로그 URL(예: https://myblog.tistory.com)을 확인해주세요.',
         };
       }
 
@@ -2018,26 +2293,32 @@ export class PlaywrightAuthService {
         timeout: 60000,
       });
       await page.waitForTimeout(2000);
-      
+
       // 로그인 상태 확인
-      const isLoggedIn = await page.$('button:has-text("로그아웃"), a:has-text("로그아웃")');
+      const isLoggedIn = await page.$(
+        'button:has-text("로그아웃"), a:has-text("로그아웃")',
+      );
       this.logger.log(isLoggedIn ? '로그인 상태 확인됨' : '로그인 상태 아님');
 
       // 2단계: 계정 정보 레이어를 열어서 운영 중인 블로그 목록 확인
       let actualBlogName = blogName; // 기본값은 파라미터에서 추출한 블로그명
-      
+
       try {
         // 계정정보 레이어 열기 버튼 클릭
-        const accountBtn = await page.$('button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]');
+        const accountBtn = await page.$(
+          'button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]',
+        );
         if (accountBtn) {
           await accountBtn.click();
           await page.waitForTimeout(1500);
           this.logger.log('계정정보 레이어 열림');
-          
+
           // 운영 중인 블로그 목록에서 "쓰기" 링크 찾기
           // 구조: link "쓰기" [href="https://re-rank.tistory.com/manage/post"]
-          const writeLinks = await page.$$('a[href*="/manage/post"], a[href*="/manage/newpost"]');
-          
+          const writeLinks = await page.$$(
+            'a[href*="/manage/post"], a[href*="/manage/newpost"]',
+          );
+
           if (writeLinks.length > 0) {
             // blogUrl과 일치하는 블로그 찾기
             let foundMatchingBlog = false;
@@ -2048,7 +2329,7 @@ export class PlaywrightAuthService {
                 if (match) {
                   const foundBlogName = match[1];
                   this.logger.log(`발견된 블로그: ${foundBlogName}`);
-                  
+
                   // blogUrl 파라미터와 일치하면 해당 블로그 사용
                   if (blogUrl && blogUrl.includes(foundBlogName)) {
                     actualBlogName = foundBlogName;
@@ -2056,7 +2337,7 @@ export class PlaywrightAuthService {
                     this.logger.log(`매칭된 블로그 사용: ${actualBlogName}`);
                     break;
                   }
-                  
+
                   // 첫 번째 블로그를 기본값으로 저장
                   if (!foundMatchingBlog && !actualBlogName) {
                     actualBlogName = foundBlogName;
@@ -2064,7 +2345,7 @@ export class PlaywrightAuthService {
                 }
               }
             }
-            
+
             // 매칭되는 블로그가 없으면 첫 번째 블로그 사용
             if (!foundMatchingBlog && writeLinks.length > 0) {
               const firstLink = writeLinks[0];
@@ -2078,7 +2359,7 @@ export class PlaywrightAuthService {
               }
             }
           }
-          
+
           // ESC로 레이어 닫기
           await page.keyboard.press('Escape');
           await page.waitForTimeout(500);
@@ -2092,7 +2373,8 @@ export class PlaywrightAuthService {
         await context.close();
         return {
           success: false,
-          error: '발행할 블로그를 찾을 수 없습니다. 티스토리에 블로그가 있는지 확인해주세요.',
+          error:
+            '발행할 블로그를 찾을 수 없습니다. 티스토리에 블로그가 있는지 확인해주세요.',
         };
       }
 
@@ -2101,7 +2383,7 @@ export class PlaywrightAuthService {
       // 3단계: 블로그별 글쓰기 페이지로 이동
       const writeUrl = `https://${actualBlogName}.tistory.com/manage/newpost/?type=post`;
       this.logger.log(`티스토리 글쓰기 페이지로 이동: ${writeUrl}`);
-      
+
       await page.goto(writeUrl, {
         waitUntil: 'networkidle',
         timeout: 60000,
@@ -2111,37 +2393,50 @@ export class PlaywrightAuthService {
       // 현재 URL 확인
       let currentUrl = page.url();
       this.logger.log(`현재 URL: ${currentUrl}`);
-      
+
       // 로그인 페이지로 리다이렉트된 경우 - 재로그인 필요
-      if (currentUrl.includes('auth/login') || currentUrl.includes('kakao') || currentUrl.includes('accounts.kakao')) {
+      if (
+        currentUrl.includes('auth/login') ||
+        currentUrl.includes('kakao') ||
+        currentUrl.includes('accounts.kakao')
+      ) {
         this.logger.warn('로그인 페이지로 리다이렉트됨, 재로그인 시도...');
 
         // 유효한 카카오 계정(이메일 형식)인지 확인
-        const isValidEmail = username && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
+        const isValidEmail =
+          username && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(username);
 
         if (!isValidEmail || !password) {
           await context.close();
           await browser?.close();
           return {
             success: false,
-            error: '쿠키가 만료되었습니다. 프로젝트 설정 → 매체 연동에서 쿠키를 새로 입력해주세요.',
+            error:
+              '쿠키가 만료되었습니다. 프로젝트 설정 → 매체 연동에서 쿠키를 새로 입력해주세요.',
           };
         }
 
-        const reAuthResult = await this.performTistoryLogin(page, username, password);
+        const reAuthResult = await this.performTistoryLogin(
+          page,
+          username,
+          password,
+        );
         if (!reAuthResult.success) {
           await context.close();
-          return { success: false, error: `재로그인 실패: ${reAuthResult.error}` };
+          return {
+            success: false,
+            error: `재로그인 실패: ${reAuthResult.error}`,
+          };
         }
-        
+
         currentCookies = reAuthResult.cookies!;
         this.logger.log('티스토리 재로그인 성공');
-        
+
         // 재로그인 후 새 쿠키를 컨텍스트에 적용
         const newCookieArray = JSON.parse(currentCookies);
         await context.clearCookies();
         await context.addCookies(newCookieArray);
-        
+
         // 재로그인 후 티스토리 메인에서 올바른 블로그 찾기
         this.logger.log('재로그인 후 블로그 목록 확인 중...');
         await page.goto('https://www.tistory.com/', {
@@ -2149,16 +2444,20 @@ export class PlaywrightAuthService {
           timeout: 60000,
         });
         await page.waitForTimeout(2000);
-        
+
         // 계정정보 레이어에서 블로그 찾기
         try {
-          const accountBtn = await page.$('button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]');
+          const accountBtn = await page.$(
+            'button:has-text("계정정보 레이어 열기"), button[class*="profile"], img[alt*="계정정보"]',
+          );
           if (accountBtn) {
             await accountBtn.click();
             await page.waitForTimeout(1500);
-            
+
             // "쓰기" 링크에서 블로그 찾기
-            const writeLinks = await page.$$('a[href*="/manage/post"], a[href*="/manage/newpost"]');
+            const writeLinks = await page.$$(
+              'a[href*="/manage/post"], a[href*="/manage/newpost"]',
+            );
             if (writeLinks.length > 0) {
               // blogUrl과 일치하는 블로그 찾기
               for (const link of writeLinks) {
@@ -2168,14 +2467,14 @@ export class PlaywrightAuthService {
                   if (match && match[1] !== 'www') {
                     const foundBlog = match[1];
                     this.logger.log(`재로그인 후 발견된 블로그: ${foundBlog}`);
-                    
+
                     // blogUrl과 매칭되면 사용
                     if (blogUrl && blogUrl.includes(foundBlog)) {
                       actualBlogName = foundBlog;
                       this.logger.log(`매칭된 블로그 사용: ${actualBlogName}`);
                       break;
                     }
-                    
+
                     // 첫 번째 블로그 저장
                     if (!actualBlogName || actualBlogName === blogName) {
                       actualBlogName = foundBlog;
@@ -2184,20 +2483,20 @@ export class PlaywrightAuthService {
                 }
               }
             }
-            
+
             await page.keyboard.press('Escape');
             await page.waitForTimeout(500);
           }
         } catch (e) {
           this.logger.warn(`재로그인 후 블로그 찾기 실패: ${e.message}`);
         }
-        
+
         this.logger.log(`재로그인 후 발행 대상 블로그: ${actualBlogName}`);
-        
+
         // 업데이트된 블로그명으로 글쓰기 URL 재생성
         const updatedWriteUrl = `https://${actualBlogName}.tistory.com/manage/newpost/?type=post`;
         this.logger.log(`재로그인 후 글쓰기 페이지로 이동: ${updatedWriteUrl}`);
-        
+
         await page.goto(updatedWriteUrl, {
           waitUntil: 'networkidle',
           timeout: 60000,
@@ -2206,10 +2505,13 @@ export class PlaywrightAuthService {
         currentUrl = page.url();
         this.logger.log(`재로그인 후 URL: ${currentUrl}`);
       }
-      
+
       // 글쓰기 페이지 도착 확인
       // 정상: /manage/newpost 가 포함되어 있어야 함
-      if (!currentUrl.includes('/manage/newpost') && !currentUrl.includes('/manage/post')) {
+      if (
+        !currentUrl.includes('/manage/newpost') &&
+        !currentUrl.includes('/manage/post')
+      ) {
         // 에러 페이지인 경우
         if (currentUrl.includes('error') || currentUrl.includes('404')) {
           await context.close();
@@ -2218,7 +2520,7 @@ export class PlaywrightAuthService {
             error: `티스토리 글쓰기 페이지에 접근할 수 없습니다. 블로그 URL(${blogUrl})을 확인해주세요.`,
           };
         }
-        
+
         // 블로그 홈으로 리다이렉트된 경우 - 한 번 더 시도
         this.logger.warn(`글쓰기 페이지가 아님 (${currentUrl}), 재시도...`);
         await page.goto(writeUrl, {
@@ -2228,8 +2530,11 @@ export class PlaywrightAuthService {
         await page.waitForTimeout(3000);
         currentUrl = page.url();
         this.logger.log(`재시도 후 URL: ${currentUrl}`);
-        
-        if (!currentUrl.includes('/manage/newpost') && !currentUrl.includes('/manage/post')) {
+
+        if (
+          !currentUrl.includes('/manage/newpost') &&
+          !currentUrl.includes('/manage/post')
+        ) {
           await context.close();
           return {
             success: false,
@@ -2243,18 +2548,20 @@ export class PlaywrightAuthService {
       // === 제목 입력 ===
       this.logger.log('제목 입력 중...');
       let titleEntered = false;
-      
+
       // 티스토리 글쓰기 페이지 분석 결과 (2026년 기준):
       // 제목: textbox "제목을 입력하세요" [ref=e21]
       // 본문: iframe 내부 textbox "글 내용 입력" [ref=f1e1]
       // 완료 버튼: button "완료" [ref=e136]
-      
+
       // 페이지 로딩 대기
       await page.waitForTimeout(2000);
-      
+
       try {
         // 1. getByRole로 제목 입력
-        const titleInput = page.getByRole('textbox', { name: '제목을 입력하세요' });
+        const titleInput = page.getByRole('textbox', {
+          name: '제목을 입력하세요',
+        });
         if (await titleInput.isVisible({ timeout: 5000 })) {
           await titleInput.click();
           await page.waitForTimeout(300);
@@ -2265,7 +2572,7 @@ export class PlaywrightAuthService {
       } catch (e) {
         this.logger.log(`제목 입력 시도 1 실패: ${e.message}`);
       }
-      
+
       // 2. getByPlaceholder 시도
       if (!titleEntered) {
         try {
@@ -2281,7 +2588,7 @@ export class PlaywrightAuthService {
           this.logger.log(`제목 입력 시도 2 실패: ${e.message}`);
         }
       }
-      
+
       // 3. CSS 셀렉터로 시도
       if (!titleEntered) {
         const titleSelectors = [
@@ -2291,7 +2598,7 @@ export class PlaywrightAuthService {
           '#post-title',
           'input[name="title"]',
         ];
-        
+
         for (const selector of titleSelectors) {
           try {
             const titleInput = await page.$(selector);
@@ -2311,7 +2618,7 @@ export class PlaywrightAuthService {
           }
         }
       }
-      
+
       if (!titleEntered) {
         this.logger.error('제목 입력 필드를 찾지 못했습니다');
         await context.close();
@@ -2333,29 +2640,37 @@ export class PlaywrightAuthService {
         }
 
         // 1. HTML 특수문자 이스케이프 (기존 <a> 태그 보존)
-        const preserveLinks = text.replace(/<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi, '___LINK_START___$1___LINK_SEP___$2___LINK_END___');
+        const preserveLinks = text.replace(
+          /<a\s+href="([^"]+)"[^>]*>([^<]+)<\/a>/gi,
+          '___LINK_START___$1___LINK_SEP___$2___LINK_END___',
+        );
 
         // 2. 단락 구분: \n\n을 </p><p>로 변환
         const paragraphs = preserveLinks.split(/\n\n+/);
 
         // 3. 각 단락 내 줄바꿈: \n을 <br>로 변환
         const htmlParagraphs = paragraphs
-          .map(p => p.trim())
-          .filter(p => p.length > 0)
-          .map(p => {
+          .map((p) => p.trim())
+          .filter((p) => p.length > 0)
+          .map((p) => {
             const withBr = p.replace(/\n/g, '<br>');
             return `<p>${withBr}</p>`;
           });
 
         // 4. 링크 복원
         let result = htmlParagraphs.join('\n');
-        result = result.replace(/___LINK_START___([^_]+)___LINK_SEP___([^_]+)___LINK_END___/g, '<a href="$1">$2</a>');
+        result = result.replace(
+          /___LINK_START___([^_]+)___LINK_SEP___([^_]+)___LINK_END___/g,
+          '<a href="$1">$2</a>',
+        );
 
         return result;
       };
 
       const htmlContent = convertToHtml(content);
-      this.logger.log(`HTML 변환 완료 (원본 길이: ${content.length}, HTML 길이: ${htmlContent.length})`);
+      this.logger.log(
+        `HTML 변환 완료 (원본 길이: ${content.length}, HTML 길이: ${htmlContent.length})`,
+      );
 
       // 티스토리는 iframe 기반 에디터 사용 (TinyMCE)
       // TinyMCE는 HTML을 지원하므로 직접 HTML 삽입
@@ -2366,7 +2681,9 @@ export class PlaywrightAuthService {
           const frame = await iframeElement.contentFrame();
           if (frame) {
             // TinyMCE의 body에 HTML 삽입
-            const editorBody = await frame.$('body[contenteditable="true"], body');
+            const editorBody = await frame.$(
+              'body[contenteditable="true"], body',
+            );
             if (editorBody) {
               await editorBody.click();
               await page.waitForTimeout(500);
@@ -2390,17 +2707,19 @@ export class PlaywrightAuthService {
       } catch (e) {
         this.logger.log(`본문 HTML 삽입 실패: ${e.message}`);
       }
-      
+
       // 2. Playwright frameLocator 사용 (텍스트 입력 fallback)
       if (!contentEntered) {
         try {
           const iframeLocator = page.frameLocator('iframe').first();
-          const editorTextbox = iframeLocator.getByRole('textbox', { name: '글 내용 입력' });
-          
+          const editorTextbox = iframeLocator.getByRole('textbox', {
+            name: '글 내용 입력',
+          });
+
           if (await editorTextbox.isVisible({ timeout: 5000 })) {
             await editorTextbox.click();
             await page.waitForTimeout(500);
-            
+
             // HTML을 텍스트로 변환 (fallback)
             const plainContent = content
               .replace(/<br\s*\/?>/gi, '\n')
@@ -2413,7 +2732,7 @@ export class PlaywrightAuthService {
               .replace(/&lt;/g, '<')
               .replace(/&gt;/g, '>')
               .trim();
-            
+
             await page.keyboard.type(plainContent, { delay: 10 });
             contentEntered = true;
             this.logger.log('본문 입력 성공: frameLocator + textbox (텍스트)');
@@ -2422,7 +2741,7 @@ export class PlaywrightAuthService {
           this.logger.log(`본문 텍스트 입력 실패: ${e.message}`);
         }
       }
-      
+
       if (!contentEntered) {
         this.logger.error('본문 입력 필드를 찾지 못했습니다');
         await context.close();
@@ -2434,7 +2753,7 @@ export class PlaywrightAuthService {
       // === 완료(발행) 버튼 클릭 ===
       this.logger.log('완료 버튼 클릭 중...');
       let publishClicked = false;
-      
+
       // 티스토리 글쓰기 페이지 분석 결과 (2026년 기준):
       // 완료 버튼: button "완료" [ref=e136]
       try {
@@ -2448,7 +2767,7 @@ export class PlaywrightAuthService {
       } catch (e) {
         this.logger.log(`완료 버튼 시도 1 실패: ${e.message}`);
       }
-      
+
       // 대체 셀렉터 시도
       if (!publishClicked) {
         const publishBtnSelectors = [
@@ -2458,7 +2777,7 @@ export class PlaywrightAuthService {
           '.btn_publish',
           '#publish-btn',
         ];
-        
+
         for (const selector of publishBtnSelectors) {
           try {
             const publishBtn = await page.$(selector);
@@ -2472,12 +2791,14 @@ export class PlaywrightAuthService {
               }
             }
           } catch (e) {
-            this.logger.log(`발행 버튼 셀렉터 시도 실패 (${selector}): ${e.message}`);
+            this.logger.log(
+              `발행 버튼 셀렉터 시도 실패 (${selector}): ${e.message}`,
+            );
             continue;
           }
         }
       }
-      
+
       if (!publishClicked) {
         this.logger.warn('완료 버튼을 찾지 못함 - Ctrl+Enter 시도');
         // Ctrl+Enter로 발행 시도
@@ -2491,7 +2812,7 @@ export class PlaywrightAuthService {
       // 추가 확인 모달 처리 (발행 설정 모달)
       try {
         this.logger.log('발행 설정 모달 체크 중...');
-        
+
         // 1. 공개 설정 확인 (공개/비공개 선택)
         const publicOptionSelectors = [
           'input[type="radio"][value="public"]',
@@ -2591,7 +2912,7 @@ export class PlaywrightAuthService {
         };
       }
       this.logger.log(`발행 후 URL: ${finalUrl}`);
-      
+
       // 포스트 ID 추출 시도 (URL에서)
       let postId = '';
       const postIdMatch = finalUrl.match(/\/(\d+)(?:\?|$)/);
@@ -2602,7 +2923,9 @@ export class PlaywrightAuthService {
       // 발행 성공 여부 확인
       // 1. 글쓰기 페이지가 아닌 곳으로 이동했으면 성공
       // 2. 또는 URL이 변경되지 않았어도 추가 확인 (브라우저에서 직접 확인)
-      let publishSuccess = !finalUrl.includes('/manage/newpost') && !finalUrl.includes('/manage/post/');
+      let publishSuccess =
+        !finalUrl.includes('/manage/newpost') &&
+        !finalUrl.includes('/manage/post/');
 
       // URL이 변경되지 않은 경우 - 발행된 글 목록으로 이동했는지 추가 확인
       if (!publishSuccess && finalUrl.includes('/manage/')) {
@@ -2620,7 +2943,9 @@ export class PlaywrightAuthService {
 
       // 여전히 글쓰기 페이지에 있는 경우 - 경고 표시하지만 성공으로 처리
       if (!publishSuccess) {
-        this.logger.warn('발행 완료 여부를 확인할 수 없음 - 하지만 성공으로 간주');
+        this.logger.warn(
+          '발행 완료 여부를 확인할 수 없음 - 하지만 성공으로 간주',
+        );
         // 완료 버튼을 눌렀고 에러가 없었다면 성공으로 간주
         publishSuccess = publishClicked;
       }
@@ -2634,13 +2959,22 @@ export class PlaywrightAuthService {
         this.logger.log('쿠키 저장 실패');
       }
 
-      const postUrl = postId && blogName
-        ? `https://${blogName}.tistory.com/${postId}`
-        : finalUrl;
+      const postUrl =
+        postId && blogName
+          ? `https://${blogName}.tistory.com/${postId}`
+          : finalUrl;
 
       // 정리: 컨텍스트와 브라우저 모두 종료
-      try { await context?.close(); } catch { /* ignore */ }
-      try { await browser?.close(); } catch { /* ignore */ }
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
 
       if (publishSuccess || postId) {
         this.logger.log(`티스토리 발행 완료: ${postUrl}`);
@@ -2654,15 +2988,24 @@ export class PlaywrightAuthService {
         this.logger.warn('발행 완료 여부를 확인할 수 없음');
         return {
           success: false,
-          error: '발행이 완료되었는지 확인할 수 없습니다. 티스토리에서 직접 확인해주세요.',
+          error:
+            '발행이 완료되었는지 확인할 수 없습니다. 티스토리에서 직접 확인해주세요.',
           postUrl: finalUrl,
           newCookies,
         };
       }
     } catch (error) {
       // 정리: 컨텍스트와 브라우저 모두 종료
-      try { await context?.close(); } catch { /* ignore */ }
-      try { await browser?.close(); } catch { /* ignore */ }
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
       this.logger.error(`티스토리 발행 오류: ${error.message}`);
       return {
         success: false,
@@ -2680,7 +3023,8 @@ export class PlaywrightAuthService {
   ): Promise<BlogStats | null> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     });
 
     try {
@@ -2691,10 +3035,13 @@ export class PlaywrightAuthService {
       const page = await context.newPage();
 
       // 블로그 통계 페이지로 이동
-      await page.goto(`https://blog.naver.com/BlogStatisticsInfo.naver?blogId=${blogId}`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
+      await page.goto(
+        `https://blog.naver.com/BlogStatisticsInfo.naver?blogId=${blogId}`,
+        {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        },
+      );
 
       await page.waitForTimeout(2000);
 
@@ -2706,10 +3053,15 @@ export class PlaywrightAuthService {
 
       // 오늘 방문자 추출
       try {
-        const todayEl = await page.$('.today .cnt, .today_cnt, [class*="today"] .count');
+        const todayEl = await page.$(
+          '.today .cnt, .today_cnt, [class*="today"] .count',
+        );
         if (todayEl) {
           const text = await todayEl.textContent();
-          stats.todayVisitors = parseInt(text?.replace(/[^\d]/g, '') || '0', 10);
+          stats.todayVisitors = parseInt(
+            text?.replace(/[^\d]/g, '') || '0',
+            10,
+          );
         }
       } catch {
         // 무시
@@ -2717,7 +3069,9 @@ export class PlaywrightAuthService {
 
       // 총 방문자 추출
       try {
-        const totalEl = await page.$('.total .cnt, .total_cnt, [class*="total"] .count');
+        const totalEl = await page.$(
+          '.total .cnt, .total_cnt, [class*="total"] .count',
+        );
         if (totalEl) {
           const text = await totalEl.textContent();
           stats.totalViews = parseInt(text?.replace(/[^\d]/g, '') || '0', 10);
@@ -2737,21 +3091,25 @@ export class PlaywrightAuthService {
 
   /**
    * 수동 로그인을 위한 브라우저 열기 (2차 인증 지원)
-   * 
+   *
    * 사용자가 직접 브라우저에서 로그인(2차 인증 완료)하면,
    * 쿠키를 저장하여 이후 자동 발행에 사용할 수 있습니다.
-   * 
+   *
    * @param platform - 플랫폼 (tistory 또는 naver)
    * @returns 브라우저 세션 ID (쿠키 저장 시 사용)
    */
-  private manualLoginSessions: Map<string, { context: BrowserContext; page: Page; platform: string }> = new Map();
+  private manualLoginSessions: Map<
+    string,
+    { context: BrowserContext; page: Page; platform: string }
+  > = new Map();
 
   async openManualLoginBrowser(
     platform: 'tistory' | 'naver',
   ): Promise<{ success: boolean; sessionId?: string; message: string }> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       viewport: { width: 1280, height: 900 },
     });
 
@@ -2793,17 +3151,15 @@ export class PlaywrightAuthService {
 
   /**
    * 수동 로그인 후 쿠키 저장
-   * 
+   *
    * 사용자가 브라우저에서 로그인을 완료한 후 호출하여 쿠키를 저장합니다.
-   * 
+   *
    * @param sessionId - openManualLoginBrowser에서 반환된 세션 ID
    * @returns 쿠키 문자열 및 계정 정보
    */
-  async saveManualLoginCookies(
-    sessionId: string,
-  ): Promise<AuthResult> {
+  async saveManualLoginCookies(sessionId: string): Promise<AuthResult> {
     const session = this.manualLoginSessions.get(sessionId);
-    
+
     if (!session) {
       return {
         success: false,
@@ -2820,15 +3176,19 @@ export class PlaywrightAuthService {
       // 로그인 상태 확인
       if (platform === 'tistory') {
         // 티스토리 로그인 상태 확인 - 로그인 페이지가 아니면 성공
-        if (currentUrl.includes('auth/login') || currentUrl.includes('accounts.kakao.com')) {
+        if (
+          currentUrl.includes('auth/login') ||
+          currentUrl.includes('accounts.kakao.com')
+        ) {
           return {
             success: false,
-            message: '아직 로그인이 완료되지 않았습니다. 브라우저에서 로그인을 완료해주세요.',
+            message:
+              '아직 로그인이 완료되지 않았습니다. 브라우저에서 로그인을 완료해주세요.',
           };
         }
 
         // 블로그 정보 추출 시도
-        let blogName = '';
+        const blogName = '';
         let blogUrl = '';
         let blogId = '';
 
@@ -2846,7 +3206,10 @@ export class PlaywrightAuthService {
             const href = await link.getAttribute('href');
             if (href) {
               const match = href.match(/https?:\/\/([^.]+)\.tistory\.com/);
-              if (match && !['www', 'notice', 'cs', 'policy'].includes(match[1])) {
+              if (
+                match &&
+                !['www', 'notice', 'cs', 'policy'].includes(match[1])
+              ) {
                 blogId = match[1];
                 blogUrl = `https://${blogId}.tistory.com`;
                 this.logger.log(`블로그 URL 발견: ${blogUrl}`);
@@ -2876,13 +3239,13 @@ export class PlaywrightAuthService {
           },
           cookies: cookieString,
         };
-
       } else if (platform === 'naver') {
         // 네이버 로그인 상태 확인
         if (currentUrl.includes('nidlogin') || currentUrl.includes('login')) {
           return {
             success: false,
-            message: '아직 로그인이 완료되지 않았습니다. 브라우저에서 로그인을 완료해주세요.',
+            message:
+              '아직 로그인이 완료되지 않았습니다. 브라우저에서 로그인을 완료해주세요.',
           };
         }
 
@@ -2936,7 +3299,6 @@ export class PlaywrightAuthService {
         success: false,
         message: '지원하지 않는 플랫폼입니다.',
       };
-
     } catch (error) {
       await context.close();
       this.manualLoginSessions.delete(sessionId);
@@ -2975,4 +3337,3 @@ export class PlaywrightAuthService {
     this.logger.log('모든 수동 로그인 세션 정리 완료');
   }
 }
-

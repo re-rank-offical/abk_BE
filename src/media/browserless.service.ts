@@ -1,6 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { chromium, Browser, BrowserContext, CDPSession, Page } from 'playwright';
+import {
+  chromium,
+  Browser,
+  BrowserContext,
+  CDPSession,
+  Page,
+} from 'playwright-core';
 
 interface BrowserlessSession {
   sessionId: string;
@@ -46,14 +52,17 @@ export class BrowserlessService {
   /**
    * Browserless.io에 연결하여 원격 브라우저 세션 시작
    */
-  async startSession(platform: 'tistory' | 'naver'): Promise<StartSessionResult> {
+  async startSession(
+    platform: 'tistory' | 'naver',
+  ): Promise<StartSessionResult> {
     const apiKey = this.configService.get<string>('BROWSERLESS_API_KEY');
 
     if (!apiKey) {
       this.logger.error('BROWSERLESS_API_KEY가 설정되지 않았습니다.');
       return {
         success: false,
-        message: 'Browserless API Key가 설정되지 않았습니다. 환경변수를 확인해주세요.',
+        message:
+          'Browserless API Key가 설정되지 않았습니다. 환경변수를 확인해주세요.',
       };
     }
 
@@ -69,7 +78,9 @@ export class BrowserlessService {
       // Free tier는 최대 60초 제한
       const browserlessUrl = `wss://chrome.browserless.io?token=${apiKey}&launch=${encodeURIComponent(launchOptions)}`;
 
-      this.logger.log(`Browserless.io에 연결 중... (platform: ${platform}, sessionId: ${sessionId})`);
+      this.logger.log(
+        `Browserless.io에 연결 중... (platform: ${platform}, sessionId: ${sessionId})`,
+      );
 
       // Playwright로 Browserless.io에 연결
       const browser = await chromium.connectOverCDP(browserlessUrl, {
@@ -105,21 +116,37 @@ export class BrowserlessService {
       // Browserless.io에서 liveURL 가져오기
       let liveViewUrl = '';
       try {
-        const liveUrlResponse = await cdpSession.send('Browserless.liveURL' as any, {
-          timeout: 55000, // 55초 (Free tier 60초 제한)
-        });
-        liveViewUrl = (liveUrlResponse as any).liveURL || (liveUrlResponse as any).url || '';
-        this.logger.log(`LiveURL 가져오기 응답: ${JSON.stringify(liveUrlResponse)}`);
+        const liveUrlResponse = await cdpSession.send(
+          'Browserless.liveURL' as any,
+          {
+            timeout: 55000, // 55초 (Free tier 60초 제한)
+          },
+        );
+        liveViewUrl =
+          (liveUrlResponse as any).liveURL ||
+          (liveUrlResponse as any).url ||
+          '';
+        this.logger.log(
+          `LiveURL 가져오기 응답: ${JSON.stringify(liveUrlResponse)}`,
+        );
       } catch (liveUrlError) {
         this.logger.warn(`LiveURL 가져오기 실패: ${liveUrlError.message}`);
 
         // Browserless.reconnect 시도
         try {
-          const reconnectResponse = await cdpSession.send('Browserless.reconnect' as any, {
-            timeout: 600000,
-          });
-          liveViewUrl = (reconnectResponse as any).liveURL || (reconnectResponse as any).browserWSEndpoint || '';
-          this.logger.log(`Reconnect 응답: ${JSON.stringify(reconnectResponse)}`);
+          const reconnectResponse = await cdpSession.send(
+            'Browserless.reconnect' as any,
+            {
+              timeout: 600000,
+            },
+          );
+          liveViewUrl =
+            (reconnectResponse as any).liveURL ||
+            (reconnectResponse as any).browserWSEndpoint ||
+            '';
+          this.logger.log(
+            `Reconnect 응답: ${JSON.stringify(reconnectResponse)}`,
+          );
         } catch (reconnectError) {
           this.logger.warn(`Reconnect 실패: ${reconnectError.message}`);
         }
@@ -127,11 +154,14 @@ export class BrowserlessService {
 
       // liveURL이 여전히 비어있으면 오류 반환 (fallback URL은 세션과 연결되지 않음)
       if (!liveViewUrl) {
-        this.logger.error('LiveURL을 가져올 수 없음 - Browserless.io Free tier 제한일 수 있음');
+        this.logger.error(
+          'LiveURL을 가져올 수 없음 - Browserless.io Free tier 제한일 수 있음',
+        );
         await browser.close();
         return {
           success: false,
-          message: 'Browserless.io에서 라이브 뷰 URL을 가져올 수 없습니다. 쿠키 직접 입력 방식을 사용해주세요.',
+          message:
+            'Browserless.io에서 라이브 뷰 URL을 가져올 수 없습니다. 쿠키 직접 입력 방식을 사용해주세요.',
         };
       }
 
@@ -165,7 +195,9 @@ export class BrowserlessService {
 
       this.sessions.set(sessionId, session);
 
-      this.logger.log(`세션 시작 성공: ${sessionId}, liveViewUrl: ${liveViewUrl}`);
+      this.logger.log(
+        `세션 시작 성공: ${sessionId}, liveViewUrl: ${liveViewUrl}`,
+      );
 
       return {
         success: true,
@@ -204,7 +236,8 @@ export class BrowserlessService {
       if (!cookies || cookies.length === 0) {
         return {
           success: false,
-          message: '쿠키를 찾을 수 없습니다. 로그인이 완료되었는지 확인해주세요.',
+          message:
+            '쿠키를 찾을 수 없습니다. 로그인이 완료되었는지 확인해주세요.',
         };
       }
 
@@ -224,14 +257,18 @@ export class BrowserlessService {
 
       if (platform === 'tistory') {
         // 티스토리 로그인 확인
-        isLoggedIn = !currentUrl.includes('/auth/login') &&
-                     (currentUrl.includes('tistory.com') || cookies.some(c => c.name === 'TSSESSION'));
+        isLoggedIn =
+          !currentUrl.includes('/auth/login') &&
+          (currentUrl.includes('tistory.com') ||
+            cookies.some((c) => c.name === 'TSSESSION'));
 
         if (isLoggedIn) {
           // 블로그 정보 추출 시도
           try {
             const blogName = await page.evaluate(() => {
-              const blogLink = document.querySelector('.blog_name, .tistory_logo a, .identity a');
+              const blogLink = document.querySelector(
+                '.blog_name, .tistory_logo a, .identity a',
+              );
               return blogLink?.textContent?.trim() || '';
             });
 
@@ -244,18 +281,24 @@ export class BrowserlessService {
         }
       } else if (platform === 'naver') {
         // 네이버 로그인 확인
-        isLoggedIn = !currentUrl.includes('nidlogin') &&
-                     !currentUrl.includes('/login') &&
-                     cookies.some(c => c.name === 'NID_AUT' || c.name === 'NID_SES');
+        isLoggedIn =
+          !currentUrl.includes('nidlogin') &&
+          !currentUrl.includes('/login') &&
+          cookies.some((c) => c.name === 'NID_AUT' || c.name === 'NID_SES');
 
         if (isLoggedIn) {
           // 네이버 계정 정보 추출 시도
           try {
-            await page.goto('https://blog.naver.com', { waitUntil: 'domcontentloaded', timeout: 10000 });
+            await page.goto('https://blog.naver.com', {
+              waitUntil: 'domcontentloaded',
+              timeout: 10000,
+            });
             await page.waitForTimeout(1000);
 
             const blogInfo = await page.evaluate(() => {
-              const blogName = document.querySelector('.nick, .blog_name, .blog_title')?.textContent?.trim();
+              const blogName = document
+                .querySelector('.nick, .blog_name, .blog_title')
+                ?.textContent?.trim();
               const blogUrl = window.location.href;
               return { name: blogName || '', url: blogUrl };
             });
@@ -272,13 +315,14 @@ export class BrowserlessService {
       if (!isLoggedIn) {
         return {
           success: false,
-          message: '로그인이 완료되지 않았습니다. 로그인을 완료한 후 다시 시도해주세요.',
+          message:
+            '로그인이 완료되지 않았습니다. 로그인을 완료한 후 다시 시도해주세요.',
         };
       }
 
       // 쿠키를 문자열로 변환
       const cookieString = cookies
-        .map(c => `${c.name}=${c.value}`)
+        .map((c) => `${c.name}=${c.value}`)
         .join('; ');
 
       // 세션 정리

@@ -1,7 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { launch } from 'cloakbrowser';
 import { Browser, BrowserContext } from 'playwright-core';
 
 import {
@@ -838,6 +837,10 @@ export class BacklinkSitesService {
     this.logger.log('CloakBrowser 스텔스 브라우저 실행');
 
     try {
+      const { launch } = await (Function(
+        'return import("cloakbrowser")',
+      )() as Promise<typeof import('cloakbrowser')>);
+
       return (await launch({
         headless: true,
         args: [

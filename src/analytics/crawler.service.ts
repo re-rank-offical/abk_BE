@@ -1,8 +1,13 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { chromium, Browser, Page } from 'playwright';
-import { KeywordRanking, SearchEngine } from '../database/entities/keyword-ranking.entity';
+import { chromium, Browser } from 'playwright-core';
+import * as fs from 'fs';
+import { execSync } from 'child_process';
+import {
+  KeywordRanking,
+  SearchEngine,
+} from '../database/entities/keyword-ranking.entity';
 import { MediaAnalytics } from '../database/entities/media-analytics.entity';
 import { TrafficSnapshot } from '../database/entities/traffic-snapshot.entity';
 import { MediaPlatform } from '../database/entities/media-connection.entity';
@@ -45,13 +50,15 @@ export class CrawlerService {
    */
   private async getBrowser(): Promise<Browser> {
     if (!this.browser || !this.browser.isConnected()) {
-      const fs = require('fs');
-      const { execSync } = require('child_process');
+      // fs, execSync는 top-level에서 import됨
 
       let execPath: string | undefined = undefined;
 
       // 1. 환경변수로 직접 지정된 경로 확인
-      if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
+      if (
+        process.env.CHROMIUM_PATH &&
+        fs.existsSync(process.env.CHROMIUM_PATH)
+      ) {
         execPath = process.env.CHROMIUM_PATH;
         this.logger.log(`환경변수 CHROMIUM_PATH 사용: ${execPath}`);
       }
@@ -59,7 +66,10 @@ export class CrawlerService {
       // 2. 시스템 chromium 찾기
       if (!execPath) {
         try {
-          const systemChromium = execSync('which chromium || which chromium-browser || which google-chrome', { encoding: 'utf-8' }).trim();
+          const systemChromium = execSync(
+            'which chromium || which chromium-browser || which google-chrome',
+            { encoding: 'utf-8' },
+          ).trim();
           if (systemChromium && fs.existsSync(systemChromium)) {
             execPath = systemChromium;
             this.logger.log(`시스템 Chromium 발견: ${execPath}`);
@@ -71,7 +81,8 @@ export class CrawlerService {
 
       // 3. Playwright 번들 Chromium 경로 확인
       if (!execPath) {
-        const playwrightPath = process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
+        const playwrightPath =
+          process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
         const possiblePaths = [
           `${playwrightPath}/chromium-1200/chrome-linux64/chrome`,
           `${playwrightPath}/chromium-1200/chrome-linux/chrome`,
@@ -86,7 +97,9 @@ export class CrawlerService {
         }
       }
 
-      this.logger.log(`최종 브라우저 경로: ${execPath || 'Playwright 기본값 사용'}`);
+      this.logger.log(
+        `최종 브라우저 경로: ${execPath || 'Playwright 기본값 사용'}`,
+      );
 
       this.browser = await chromium.launch({
         headless: true,
@@ -134,23 +147,31 @@ export class CrawlerService {
 
       // 블로그 섹션 검색 결과 추출
       const results: NaverSearchResult[] = [];
-      
+
       // 통합검색 결과에서 블로그 섹션 찾기
-      const blogSection = await page.$('#main_pack .blog_list, #main_pack .type_blog, .api_subject_bx');
-      
+      const blogSection = await page.$(
+        '#main_pack .blog_list, #main_pack .type_blog, .api_subject_bx',
+      );
+
       if (blogSection) {
         const items = await blogSection.$$('.bx, .item, li');
-        
+
         for (let i = 0; i < Math.min(items.length, maxResults); i++) {
           try {
-            const titleEl = await items[i].$('.title_link, .api_txt_lines, a.title');
-            const descEl = await items[i].$('.dsc_txt, .api_txt_lines.dsc, .desc');
-            
+            const titleEl = await items[i].$(
+              '.title_link, .api_txt_lines, a.title',
+            );
+            const descEl = await items[i].$(
+              '.dsc_txt, .api_txt_lines.dsc, .desc',
+            );
+
             if (titleEl) {
-              const title = await titleEl.textContent() || '';
-              const url = await titleEl.getAttribute('href') || '';
-              const description = descEl ? (await descEl.textContent() || '') : '';
-              
+              const title = (await titleEl.textContent()) || '';
+              const url = (await titleEl.getAttribute('href')) || '';
+              const description = descEl
+                ? (await descEl.textContent()) || ''
+                : '';
+
               results.push({
                 rank: i + 1,
                 title: title.trim(),
@@ -170,17 +191,21 @@ export class CrawlerService {
       await page.waitForTimeout(2000);
 
       const blogItems = await page.$$('.view_wrap, .total_tit, .api_txt_lines');
-      
-      for (let i = results.length; i < maxResults && i - results.length < blogItems.length; i++) {
+
+      for (
+        let i = results.length;
+        i < maxResults && i - results.length < blogItems.length;
+        i++
+      ) {
         try {
           const item = blogItems[i - results.length];
           const titleEl = await item.$('.title_link, .api_txt_lines, a');
-          
+
           if (titleEl) {
-            const title = await titleEl.textContent() || '';
-            const url = await titleEl.getAttribute('href') || '';
-            
-            if (url && !results.some(r => r.url === url)) {
+            const title = (await titleEl.textContent()) || '';
+            const url = (await titleEl.getAttribute('href')) || '';
+
+            if (url && !results.some((r) => r.url === url)) {
               results.push({
                 rank: results.length + 1,
                 title: title.trim(),
@@ -229,14 +254,18 @@ export class CrawlerService {
     connection: MediaConnection,
   ): Promise<BlogStats | null> {
     if (!connection.username || !connection.password) {
-      this.logger.warn('네이버 블로그 크롤링: 인증 정보 없음. 매체 연동 설정에서 로그인 정보를 입력해주세요.');
+      this.logger.warn(
+        '네이버 블로그 크롤링: 인증 정보 없음. 매체 연동 설정에서 로그인 정보를 입력해주세요.',
+      );
       return null;
     }
 
     // 블로그 ID 추출
     const blogId = this.extractNaverBlogId(connection.accountUrl || '');
     if (!blogId) {
-      this.logger.warn(`네이버 블로그 ID 추출 실패: ${connection.accountUrl}. URL 형식: https://blog.naver.com/블로그ID`);
+      this.logger.warn(
+        `네이버 블로그 ID 추출 실패: ${connection.accountUrl}. URL 형식: https://blog.naver.com/블로그ID`,
+      );
       return null;
     }
 
@@ -247,7 +276,9 @@ export class CrawlerService {
     page.setDefaultTimeout(60000); // 60초
 
     try {
-      this.logger.log(`네이버 블로그 통계 수집 시작: ${connection.accountUrl} (블로그 ID: ${blogId})`);
+      this.logger.log(
+        `네이버 블로그 통계 수집 시작: ${connection.accountUrl} (블로그 ID: ${blogId})`,
+      );
 
       // 네이버 로그인
       await page.goto('https://nid.naver.com/nidlogin.login', {
@@ -256,10 +287,14 @@ export class CrawlerService {
       });
 
       // 로그인 폼 입력 (keyboard.type()으로 캡챠 우회 시도)
-      const idInput = await page.waitForSelector('#id', { timeout: 10000, state: 'attached' }).catch(() => null);
+      const idInput = await page
+        .waitForSelector('#id', { timeout: 10000, state: 'attached' })
+        .catch(() => null);
 
       if (!idInput) {
-        this.logger.warn('네이버 블로그 크롤링: 로그인 폼을 찾을 수 없습니다. 이미 로그인되어 있거나 페이지 구조가 변경되었습니다.');
+        this.logger.warn(
+          '네이버 블로그 크롤링: 로그인 폼을 찾을 수 없습니다. 이미 로그인되어 있거나 페이지 구조가 변경되었습니다.',
+        );
       } else {
         // 캡챠 우회를 위해 fill() 대신 keyboard.type() 사용
         await idInput.click();
@@ -354,13 +389,15 @@ export class CrawlerService {
 
       // 통계를 찾지 못한 경우 페이지 HTML 디버깅
       if (stats.todayVisitors === 0 && stats.totalViews === 0) {
-        this.logger.warn('통계 데이터를 찾지 못했습니다. 페이지 구조를 확인합니다.');
+        this.logger.warn(
+          '통계 데이터를 찾지 못했습니다. 페이지 구조를 확인합니다.',
+        );
 
         // 페이지 내 모든 숫자 요소 검색
         const allNumbers = await page.evaluate(() => {
           const elements = document.querySelectorAll('span, div, p, strong');
           const results: string[] = [];
-          elements.forEach(el => {
+          elements.forEach((el) => {
             const text = el.textContent?.trim() || '';
             if (/^\d{1,3}(,\d{3})*$/.test(text) || /^\d+$/.test(text)) {
               results.push(el.className + ': ' + text);
@@ -373,15 +410,21 @@ export class CrawlerService {
 
         // 디버깅용 스크린샷
         const screenshotPath = 'debug-naver-stats-' + Date.now() + '.png';
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+        await page
+          .screenshot({ path: screenshotPath, fullPage: true })
+          .catch(() => {});
         this.logger.log('디버깅 스크린샷 저장: ' + screenshotPath);
       }
 
-      this.logger.log(`네이버 블로그 통계 수집 완료: 오늘 방문자 ${stats.todayVisitors}, 총 조회수 ${stats.totalViews}`);
+      this.logger.log(
+        `네이버 블로그 통계 수집 완료: 오늘 방문자 ${stats.todayVisitors}, 총 조회수 ${stats.totalViews}`,
+      );
       return stats;
     } catch (error) {
       this.logger.error(`네이버 블로그 통계 크롤링 실패: ${error.message}`);
-      this.logger.warn('네이버 블로그 크롤링은 로그인 정보가 필요하며, 캡챠 또는 페이지 구조 변경 시 작동하지 않을 수 있습니다.');
+      this.logger.warn(
+        '네이버 블로그 크롤링은 로그인 정보가 필요하며, 캡챠 또는 페이지 구조 변경 시 작동하지 않을 수 있습니다.',
+      );
       return null;
     } finally {
       await page.close();
@@ -390,7 +433,7 @@ export class CrawlerService {
 
   /**
    * WordPress 통계 수집 (REST API 사용)
-   * 
+   *
    * WordPress REST API를 사용하여 게시물 및 통계 정보를 가져옵니다.
    * 일부 테마/플러그인은 추가 인증이 필요할 수 있습니다.
    */
@@ -404,44 +447,48 @@ export class CrawlerService {
 
     try {
       this.logger.log(`WordPress 통계 수집 시작: ${connection.accountUrl}`);
-      
+
       const baseUrl = connection.accountUrl.replace(/\/$/, '');
-      
+
       // WordPress REST API 엔드포인트
       const postsApiUrl = `${baseUrl}/wp-json/wp/v2/posts?per_page=100`;
-      
+
       // 게시물 목록 가져오기
       const response = await fetch(postsApiUrl);
-      
+
       if (!response.ok) {
-        this.logger.warn(`WordPress API 접근 실패: ${response.status} - ${response.statusText}`);
-        this.logger.warn('WordPress REST API가 비활성화되어 있거나 접근 권한이 없습니다.');
+        this.logger.warn(
+          `WordPress API 접근 실패: ${response.status} - ${response.statusText}`,
+        );
+        this.logger.warn(
+          'WordPress REST API가 비활성화되어 있거나 접근 권한이 없습니다.',
+        );
         return null;
       }
-      
+
       const posts = await response.json();
-      
+
       if (!Array.isArray(posts)) {
         this.logger.warn('WordPress API 응답이 올바르지 않습니다.');
         return null;
       }
-      
+
       const stats: BlogStats = {
         totalPosts: posts.length,
         totalViews: 0, // WordPress 기본 API는 조회수를 제공하지 않음
         todayVisitors: 0, // WordPress 기본 API는 방문자를 제공하지 않음
       };
-      
+
       // Jetpack Stats API 시도 (선택적)
       if (connection.username && connection.password) {
         try {
           const statsUrl = `${baseUrl}/wp-json/jetpack/v4/stats`;
           const statsResponse = await fetch(statsUrl, {
             headers: {
-              'Authorization': `Basic ${Buffer.from(`${connection.username}:${connection.password}`).toString('base64')}`,
+              Authorization: `Basic ${Buffer.from(`${connection.username}:${connection.password}`).toString('base64')}`,
             },
           });
-          
+
           if (statsResponse.ok) {
             const jetpackStats = await statsResponse.json();
             if (jetpackStats.stats) {
@@ -454,8 +501,10 @@ export class CrawlerService {
           this.logger.debug(`Jetpack Stats API 사용 불가: ${error.message}`);
         }
       }
-      
-      this.logger.log(`WordPress 통계 수집 완료: 총 게시물 ${stats.totalPosts}, 조회수 ${stats.totalViews}`);
+
+      this.logger.log(
+        `WordPress 통계 수집 완료: 총 게시물 ${stats.totalPosts}, 조회수 ${stats.totalViews}`,
+      );
       return stats;
     } catch (error) {
       this.logger.error(`WordPress 통계 수집 실패: ${error.message}`);
@@ -465,7 +514,7 @@ export class CrawlerService {
 
   /**
    * LinkedIn 통계 수집 (API 사용)
-   * 
+   *
    * LinkedIn API를 사용하여 게시물 통계를 가져옵니다.
    * OAuth 인증된 액세스 토큰이 필요합니다.
    */
@@ -473,69 +522,80 @@ export class CrawlerService {
     connection: MediaConnection,
   ): Promise<BlogStats | null> {
     if (!connection.accessToken) {
-      this.logger.warn('LinkedIn 통계 수집: 액세스 토큰이 없습니다. OAuth 인증을 먼저 진행해주세요.');
+      this.logger.warn(
+        'LinkedIn 통계 수집: 액세스 토큰이 없습니다. OAuth 인증을 먼저 진행해주세요.',
+      );
       return null;
     }
 
     try {
       this.logger.log(`LinkedIn 통계 수집 시작: ${connection.accountUrl}`);
-      
+
       // LinkedIn API를 사용하여 사용자 ID 가져오기
-      const userInfoResponse = await fetch('https://api.linkedin.com/v2/userinfo', {
-        headers: {
-          'Authorization': `Bearer ${connection.accessToken}`,
+      const userInfoResponse = await fetch(
+        'https://api.linkedin.com/v2/userinfo',
+        {
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+          },
         },
-      });
-      
+      );
+
       if (!userInfoResponse.ok) {
         this.logger.warn(`LinkedIn API 접근 실패: ${userInfoResponse.status}`);
-        this.logger.warn('액세스 토큰이 만료되었거나 권한이 없습니다. OAuth 재인증이 필요합니다.');
+        this.logger.warn(
+          '액세스 토큰이 만료되었거나 권한이 없습니다. OAuth 재인증이 필요합니다.',
+        );
         return null;
       }
-      
+
       const userInfo = await userInfoResponse.json();
       const userId = userInfo.sub;
-      
+
       // LinkedIn API v2를 사용하여 게시물 목록 가져오기
       // 참고: LinkedIn API는 게시물 통계에 제한이 있을 수 있음
       const postsResponse = await fetch(
         `https://api.linkedin.com/v2/ugcPosts?q=authors&authors=List(urn:li:person:${userId})&count=50`,
         {
           headers: {
-            'Authorization': `Bearer ${connection.accessToken}`,
+            Authorization: `Bearer ${connection.accessToken}`,
             'X-Restli-Protocol-Version': '2.0.0',
           },
-        }
+        },
       );
-      
+
       if (!postsResponse.ok) {
         this.logger.warn(`LinkedIn 게시물 조회 실패: ${postsResponse.status}`);
         return null;
       }
-      
+
       const postsData = await postsResponse.json();
       const posts = postsData.elements || [];
-      
+
       // 통계 집계
       let totalViews = 0;
       let totalEngagements = 0;
-      
+
       for (const post of posts) {
         // LinkedIn API는 게시물별 통계를 별도로 조회해야 함
         // 간단한 통계만 수집 (상세 통계는 별도 API 호출 필요)
         if (post.statistics) {
           totalViews += post.statistics.numViews || 0;
-          totalEngagements += (post.statistics.numLikes || 0) + (post.statistics.numComments || 0);
+          totalEngagements +=
+            (post.statistics.numLikes || 0) +
+            (post.statistics.numComments || 0);
         }
       }
-      
+
       const stats: BlogStats = {
         totalPosts: posts.length,
         totalViews: totalViews,
         todayVisitors: 0, // LinkedIn API는 일별 방문자를 제공하지 않음
       };
-      
-      this.logger.log(`LinkedIn 통계 수집 완료: 게시물 ${stats.totalPosts}, 조회수 ${stats.totalViews}`);
+
+      this.logger.log(
+        `LinkedIn 통계 수집 완료: 게시물 ${stats.totalPosts}, 조회수 ${stats.totalViews}`,
+      );
       return stats;
     } catch (error) {
       this.logger.error(`LinkedIn 통계 수집 실패: ${error.message}`);
@@ -545,31 +605,33 @@ export class CrawlerService {
 
   /**
    * 티스토리 통계 크롤링 (로그인 필요)
-   * 
+   *
    * ⚠️ 주의: 웹 크롤링은 불안정하며, 다음과 같은 문제가 발생할 수 있습니다:
    * - 로그인 페이지 구조 변경
    * - CAPTCHA 또는 보안 인증 요구
    * - 네트워크 지연 또는 타임아웃
-   * 
+   *
    * 권장: API가 있는 매체는 API를 사용하세요.
    */
   async crawlTistoryStats(
     connection: MediaConnection,
   ): Promise<BlogStats | null> {
     if (!connection.username || !connection.password) {
-      this.logger.warn('티스토리 크롤링: 인증 정보 없음. 매체 연동 설정에서 로그인 정보를 입력해주세요.');
+      this.logger.warn(
+        '티스토리 크롤링: 인증 정보 없음. 매체 연동 설정에서 로그인 정보를 입력해주세요.',
+      );
       return null;
     }
 
     const browser = await this.getBrowser();
     const page = await browser.newPage();
-    
+
     // 타임아웃 설정 증가
     page.setDefaultTimeout(60000); // 60초
 
     try {
       this.logger.log(`티스토리 통계 수집 시작: ${connection.accountUrl}`);
-      
+
       // 티스토리 로그인 페이지
       await page.goto('https://www.tistory.com/auth/login', {
         waitUntil: 'domcontentloaded',
@@ -579,18 +641,27 @@ export class CrawlerService {
       await page.waitForTimeout(2000);
 
       // 카카오 계정으로 로그인 (일반적인 경우)
-      const kakaoLoginBtn = await page.waitForSelector('.btn_login_kakao, .link_kakao_id', { timeout: 5000, state: 'visible' }).catch(() => null);
-      
+      const kakaoLoginBtn = await page
+        .waitForSelector('.btn_login_kakao, .link_kakao_id', {
+          timeout: 5000,
+          state: 'visible',
+        })
+        .catch(() => null);
+
       if (!kakaoLoginBtn) {
-        this.logger.warn('티스토리 크롤링: 카카오 로그인 버튼을 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.');
+        this.logger.warn(
+          '티스토리 크롤링: 카카오 로그인 버튼을 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.',
+        );
         // 스크린샷 저장 (디버깅용)
-        await page.screenshot({ path: `debug-tistory-login-${Date.now()}.png` }).catch(() => {});
+        await page
+          .screenshot({ path: `debug-tistory-login-${Date.now()}.png` })
+          .catch(() => {});
         return null;
       }
-      
+
       this.logger.log('카카오 로그인 버튼 클릭');
       await kakaoLoginBtn.click();
-      
+
       // 카카오 로그인 페이지 로딩 대기
       await page.waitForTimeout(5000);
 
@@ -601,39 +672,49 @@ export class CrawlerService {
       // 카카오 로그인 폼 (여러 셀렉터 시도)
       const loginSelectors = [
         '#loginId',
-        '#id_email_2', 
+        '#id_email_2',
         'input[name="email"]',
         'input[type="text"][placeholder*="카카오"]',
         'input[type="text"][placeholder*="이메일"]',
         'input.tf_g',
         '#email',
       ];
-      
+
       let loginIdInput = null;
       let usedSelector = '';
-      
+
       for (const selector of loginSelectors) {
-        loginIdInput = await page.waitForSelector(selector, { timeout: 3000, state: 'visible' }).catch(() => null);
+        loginIdInput = await page
+          .waitForSelector(selector, { timeout: 3000, state: 'visible' })
+          .catch(() => null);
         if (loginIdInput) {
           usedSelector = selector;
           this.logger.log(`카카오 로그인 폼 발견: ${selector}`);
           break;
         }
       }
-      
+
       if (!loginIdInput) {
-        this.logger.warn('티스토리 크롤링: 카카오 로그인 폼을 찾을 수 없습니다.');
+        this.logger.warn(
+          '티스토리 크롤링: 카카오 로그인 폼을 찾을 수 없습니다.',
+        );
         this.logger.log(`현재 URL: ${page.url()}`);
         // HTML 구조 출력 (디버깅용)
-        const bodyHTML = await page.evaluate(() => document.body.innerHTML).catch(() => '');
-        this.logger.debug(`페이지 HTML (앞 500자): ${bodyHTML.substring(0, 500)}`);
+        const bodyHTML = await page
+          .evaluate(() => document.body.innerHTML)
+          .catch(() => '');
+        this.logger.debug(
+          `페이지 HTML (앞 500자): ${bodyHTML.substring(0, 500)}`,
+        );
         // 스크린샷 저장 (디버깅용)
-        await page.screenshot({ path: `debug-kakao-login-${Date.now()}.png` }).catch(() => {});
+        await page
+          .screenshot({ path: `debug-kakao-login-${Date.now()}.png` })
+          .catch(() => {});
         return null;
       }
 
       this.logger.log('카카오 로그인 폼 발견, 로그인 시도');
-      
+
       // 비밀번호 셀렉터
       const passwordSelectors = [
         '#password',
@@ -642,7 +723,7 @@ export class CrawlerService {
         'input[type="password"]',
         'input.tf_g[type="password"]',
       ];
-      
+
       let passwordInput = null;
       for (const selector of passwordSelectors) {
         passwordInput = await page.$(selector);
@@ -650,16 +731,18 @@ export class CrawlerService {
           break;
         }
       }
-      
+
       if (!passwordInput) {
-        this.logger.warn('티스토리 크롤링: 비밀번호 입력 필드를 찾을 수 없습니다.');
+        this.logger.warn(
+          '티스토리 크롤링: 비밀번호 입력 필드를 찾을 수 없습니다.',
+        );
         return null;
       }
-      
+
       // 로그인 정보 입력
       await loginIdInput.fill(connection.username);
       await passwordInput.fill(connection.password);
-      
+
       // 로그인 버튼 클릭
       const submitSelectors = [
         '.btn_confirm',
@@ -668,7 +751,7 @@ export class CrawlerService {
         '.btn_g.highlight',
         'button.btn_g',
       ];
-      
+
       let submitted = false;
       for (const selector of submitSelectors) {
         const submitBtn = await page.$(selector);
@@ -679,15 +762,15 @@ export class CrawlerService {
           break;
         }
       }
-      
+
       if (!submitted) {
         this.logger.warn('티스토리 크롤링: 로그인 버튼을 찾을 수 없습니다.');
         return null;
       }
-      
+
       // 로그인 완료 대기
       await page.waitForTimeout(5000);
-      
+
       this.logger.log('로그인 완료, 통계 페이지로 이동');
 
       // 관리자 페이지로 이동
@@ -700,7 +783,9 @@ export class CrawlerService {
             timeout: 60000,
           });
         } else {
-          this.logger.warn(`티스토리 블로그 이름 추출 실패: ${connection.accountUrl}`);
+          this.logger.warn(
+            `티스토리 블로그 이름 추출 실패: ${connection.accountUrl}`,
+          );
           return null;
         }
       } else {
@@ -719,23 +804,31 @@ export class CrawlerService {
       };
 
       // 통계 데이터 추출
-      const todayEl = await page.$('.today_count, .count_today').catch(() => null);
+      const todayEl = await page
+        .$('.today_count, .count_today')
+        .catch(() => null);
       if (todayEl) {
         const text = await todayEl.textContent();
         stats.todayVisitors = this.parseNumber(text || '0');
       }
 
-      const totalEl = await page.$('.total_count, .count_total').catch(() => null);
+      const totalEl = await page
+        .$('.total_count, .count_total')
+        .catch(() => null);
       if (totalEl) {
         const text = await totalEl.textContent();
         stats.totalViews = this.parseNumber(text || '0');
       }
 
-      this.logger.log(`티스토리 통계 수집 완료: 오늘 방문자 ${stats.todayVisitors}, 총 조회수 ${stats.totalViews}`);
+      this.logger.log(
+        `티스토리 통계 수집 완료: 오늘 방문자 ${stats.todayVisitors}, 총 조회수 ${stats.totalViews}`,
+      );
       return stats;
     } catch (error) {
       this.logger.error(`티스토리 통계 크롤링 실패: ${error.message}`);
-      this.logger.warn('티스토리 크롤링은 로그인 정보가 필요하며, 페이지 구조 변경 시 작동하지 않을 수 있습니다.');
+      this.logger.warn(
+        '티스토리 크롤링은 로그인 정보가 필요하며, 페이지 구조 변경 시 작동하지 않을 수 있습니다.',
+      );
       return null;
     } finally {
       await page.close();
@@ -760,7 +853,7 @@ export class CrawlerService {
           await this.analyticsService.updateKeywordRank(keyword.id, targetRank);
         }
         // Google 크롤링은 별도 구현 필요 (API 사용 권장)
-        
+
         // 크롤링 간 딜레이 (rate limiting 방지)
         await this.delay(2000);
       } catch (error) {
@@ -774,7 +867,10 @@ export class CrawlerService {
   /**
    * 프로젝트의 모든 매체 통계 업데이트
    */
-  async updateProjectMediaStats(projectId: string, userId: string): Promise<void> {
+  async updateProjectMediaStats(
+    projectId: string,
+    userId: string,
+  ): Promise<void> {
     const connections = await this.mediaConnectionRepository.find({
       where: { projectId, userId },
     });
@@ -838,30 +934,34 @@ export class CrawlerService {
           // 통계 업데이트
           analytics.totalPosts = stats.totalPosts;
           analytics.totalViews = stats.totalViews;
-          
+
           // 평균 조회수 계산
           if (analytics.totalPosts > 0) {
             analytics.avgViews = analytics.totalViews / analytics.totalPosts;
           }
-          
+
           analytics.lastDataCollectedAt = new Date();
-          
+
           await this.mediaAnalyticsRepository.save(analytics);
-          
+
           this.logger.log(
             `${connection.platform} 통계 업데이트 완료 - 게시물: ${stats.totalPosts}, 총 조회: ${stats.totalViews}, 오늘: ${stats.todayVisitors}`,
           );
         } else {
           // 데이터 수집 실패 또는 인증 정보 없음
-          this.logger.warn(`${connection.platform} 통계 수집 실패 - 인증 정보 확인 또는 API 접근 권한을 확인해주세요.`);
-          
+          this.logger.warn(
+            `${connection.platform} 통계 수집 실패 - 인증 정보 확인 또는 API 접근 권한을 확인해주세요.`,
+          );
+
           // 기본 MediaAnalytics가 없으면 생성 (0으로 초기화)
           let analytics = await this.mediaAnalyticsRepository.findOne({
             where: { projectId, platform: connection.platform },
           });
 
           if (!analytics) {
-            this.logger.log(`${connection.platform} 기본 MediaAnalytics 생성 중...`);
+            this.logger.log(
+              `${connection.platform} 기본 MediaAnalytics 생성 중...`,
+            );
             analytics = this.mediaAnalyticsRepository.create({
               projectId,
               userId,
@@ -877,7 +977,9 @@ export class CrawlerService {
               engagementRate: 0,
             });
             await this.mediaAnalyticsRepository.save(analytics);
-            this.logger.log(`${connection.platform} 기본 MediaAnalytics 생성 완료 (데이터 수집 필요)`);
+            this.logger.log(
+              `${connection.platform} 기본 MediaAnalytics 생성 완료 (데이터 수집 필요)`,
+            );
           }
         }
 
@@ -934,4 +1036,3 @@ export class CrawlerService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
-

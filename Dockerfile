@@ -15,20 +15,22 @@ COPY . .
 # Build the application
 RUN npm run build
 
-# Production stage - Playwright 이미지 사용
+# Production stage - Playwright 이미지 사용 (Chromium 시스템 라이브러리 포함)
 FROM mcr.microsoft.com/playwright:v1.57.0-jammy
 
 WORKDIR /app
 
 # Set environment variables
 ENV NODE_ENV=production
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Copy package files
 COPY package*.json ./
 
 # Install production dependencies only
 RUN npm ci --omit=dev
+
+# CloakBrowser 스텔스 Chromium 바이너리 다운로드
+RUN npx cloakbrowser install
 
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
