@@ -434,52 +434,80 @@ export class BacklinkSitesService {
 
       this.logger.log('세션 워밍업 완료');
 
-      // 3. 글쓰기 페이지 이동
+      // 3. 글쓰기 페이지 이동 (리다이렉트 가능하므로 에러 허용)
       const writeUrl =
         site.writeUrl || `${site.siteUrl.replace(/\/$/, '')}/manage/newpost`;
-      await page.goto(writeUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
+      try {
+        await page.goto(writeUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        });
+      } catch (navErr) {
+        // 리다이렉트로 인한 "interrupted by another navigation" 에러는 무시
+        this.logger.warn(
+          `글쓰기 페이지 이동 중 에러 (리다이렉트 가능): ${navErr instanceof Error ? navErr.message.substring(0, 100) : String(navErr)}`,
+        );
+      }
       await page.waitForTimeout(3000);
 
-      // 3. 로그인 필요 여부 확인 (카카오 로그인 페이지로 리다이렉트 체크)
+      // 3-1. 로그인 필요 여부 확인
       const currentUrl = page.url();
       this.logger.log(`글쓰기 페이지 이동 후 URL: ${currentUrl}`);
       const needsLogin =
         currentUrl.includes('accounts.kakao.com') ||
-        currentUrl.includes('tistory.com/auth/login');
+        currentUrl.includes('tistory.com/auth/login') ||
+        (!currentUrl.includes('/manage/newpost') &&
+          !currentUrl.includes('/manage/edit'));
 
       if (needsLogin) {
+        this.logger.log('로그인 필요 – 카카오 로그인 시도');
         if (!site.loginUsername || !site.loginPassword) {
           return {
             success: false,
-            error: '카카오 로그인 정보가 설정되지 않았습니다.',
+            error: `카카오 로그인 정보가 설정되지 않았습니다. (현재 URL: ${currentUrl})`,
           };
         }
 
+        // /manage/ 페이지나 기타 페이지인 경우 → 티스토리 로그인 페이지로 직접 이동
+        if (!currentUrl.includes('accounts.kakao.com') && !currentUrl.includes('tistory.com/auth/login')) {
+          this.logger.log('티스토리 로그인 페이지로 직접 이동');
+          await page.goto('https://www.tistory.com/auth/login', {
+            waitUntil: 'domcontentloaded',
+            timeout: 15000,
+          });
+          await page.waitForTimeout(2000);
+        }
+
         // 티스토리 로그인 페이지인 경우 카카오 로그인 버튼 클릭
-        if (currentUrl.includes('tistory.com/auth/login')) {
+        const loginPageUrl = page.url();
+        if (loginPageUrl.includes('tistory.com/auth/login')) {
           const kakaoBtn = await page.$('.btn_login.link_kakao_id');
           if (kakaoBtn) {
             await kakaoBtn.click();
             await page.waitForTimeout(3000);
+          } else {
+            this.logger.warn('카카오 로그인 버튼을 찾지 못함');
           }
         }
 
         // 카카오 로그인 폼
+        this.logger.log(`카카오 로그인 폼 URL: ${page.url()}`);
         const emailInput = await page.$(
           'input[name="loginId"], input[name="loginKey"], #loginId--1',
         );
         if (emailInput) {
           await emailInput.click();
           await emailInput.fill(site.loginUsername);
+        } else {
+          this.logger.warn('카카오 이메일 입력 필드를 찾지 못함');
         }
 
         const pwInput = await page.$('input[name="password"], #password--2');
         if (pwInput) {
           await pwInput.click();
           await pwInput.fill(site.loginPassword);
+        } else {
+          this.logger.warn('카카오 비밀번호 입력 필드를 찾지 못함');
         }
 
         // 로그인 버튼 클릭
@@ -489,6 +517,9 @@ export class BacklinkSitesService {
         if (loginBtn) {
           await loginBtn.click();
           await page.waitForTimeout(5000);
+          this.logger.log(`로그인 후 URL: ${page.url()}`);
+        } else {
+          this.logger.warn('로그인 버튼을 찾지 못함');
         }
 
         // 로그인 후 쿠키 저장
