@@ -670,157 +670,24 @@ export class BacklinkSitesService {
 
       await page.waitForTimeout(1000);
 
-      // ── 6. Direct API 발행 (CAPTCHA 우회) ──
-      // "공개 발행" 버튼 → dkaptcha CAPTCHA가 뜨므로,
-      // UI를 거치지 않고 Tistory 내부 API를 직접 호출하여 우회한다.
-      const blogHostname = new URL(site.siteUrl).hostname;
-      const blogName = blogHostname.replace('.tistory.com', '');
-      this.logger.log(
-        `Direct API 발행 시도 (CAPTCHA 우회) – blog: ${blogName}`,
-      );
+      // ── 6. dkaptcha 인터셉트로 CAPTCHA 우회 ──
+      // Playwright page.route 로 dkaptcha 요청을 가로채,
+      // 프론트엔드가 CAPTCHA 없이 발행을 진행하도록 유도한다.
+      this.logger.log('dkaptcha 요청 인터셉트 설정 중...');
 
-      const directApiResult = await page.evaluate(
-        async (params: { title: string; body: string }) => {
-          const { title, body } = params;
-
-          // CKEditor에서 실제 에디터 콘텐츠 가져오기
-          let editorContent = body;
-          try {
-            const ck = (window as any).CKEDITOR;
-            if (ck?.instances) {
-              const keys = Object.keys(ck.instances);
-              if (keys.length > 0) {
-                const data = ck.instances[keys[0]].getData();
-                if (data) editorContent = data;
-              }
-            }
-          } catch {
-            /* fallback to body param */
-          }
-
-          const diagnostics: Array<{
-            endpoint: string;
-            status: number;
-            ok: boolean;
-            body?: string;
-          }> = [];
-
-          const tryPost = async (
-            endpoint: string,
-            data: Record<string, string>,
-            asJson: boolean,
-          ) => {
-            try {
-              const headers: Record<string, string> = {
-                'X-Requested-With': 'XMLHttpRequest',
-              };
-              let fetchBody: string;
-              if (asJson) {
-                headers['Content-Type'] = 'application/json';
-                fetchBody = JSON.stringify(data);
-              } else {
-                headers['Content-Type'] =
-                  'application/x-www-form-urlencoded; charset=UTF-8';
-                fetchBody = new URLSearchParams(data).toString();
-              }
-
-              const res = await fetch(endpoint, {
-                method: 'POST',
-                headers,
-                body: fetchBody,
-                credentials: 'same-origin',
-              });
-
-              const text = await res.text();
-              diagnostics.push({
-                endpoint: `${endpoint} (${asJson ? 'json' : 'form'})`,
-                status: res.status,
-                ok: res.ok,
-                body: text.substring(0, 300),
-              });
-
-              if (res.ok) {
-                let json: any = null;
-                try {
-                  json = JSON.parse(text);
-                } catch {
-                  /* not JSON */
-                }
-                return { success: true as const, json, text };
-              }
-            } catch (err) {
-              diagnostics.push({
-                endpoint,
-                status: 0,
-                ok: false,
-                body: String(err),
-              });
-            }
-            return null;
-          };
-
-          const postPayload: Record<string, string> = {
-            title,
-            content: editorContent,
-            visibility: '20', // 20 = 공개
-            categoryId: '0',
-            tag: '',
-            type: 'post',
-          };
-
-          // ── 엔드포인트 후보들 (Tistory 내부 관리 API) ──
-          const endpoints = [
-            '/manage/post/write.json',
-            '/manage/post/save.json',
-            '/manage/entry/post',
-            '/manage/post',
-          ];
-
-          for (const ep of endpoints) {
-            // JSON 형식
-            const jsonRes = await tryPost(ep, postPayload, true);
-            if (jsonRes)
-              return { success: true, data: jsonRes.json, diagnostics };
-
-            // form-urlencoded 형식
-            const formRes = await tryPost(ep, postPayload, false);
-            if (formRes)
-              return { success: true, data: formRes.json, diagnostics };
-          }
-
-          return { success: false, data: null, diagnostics };
-        },
-        { title, body },
-      );
-
-      if (directApiResult.success) {
-        this.logger.log(
-          `Direct API 발행 성공: ${JSON.stringify(directApiResult.data).substring(0, 200)}`,
-        );
-
-        // 쿠키 갱신
-        const apiCookies = await context.cookies();
-        await this.siteRepository.update(site.id, {
-          sessionCookies: JSON.stringify(apiCookies),
+      let dkaptchaIntercepted = false;
+      await page.route('**/manage/dkaptcha/**', async (route) => {
+        dkaptchaIntercepted = true;
+        this.logger.log(`dkaptcha 요청 인터셉트: ${route.request().url()}`);
+        // CAPTCHA 위젯 초기화 요청에 빈 응답 → 프론트엔드가 CAPTCHA 불필요로 판단하도록
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({}),
         });
+      });
 
-        // 응답에서 URL 추출
-        const d = directApiResult.data;
-        const publishedUrl =
-          (d && typeof d === 'object' && (d.url || d.link || d.postUrl)) ||
-          site.siteUrl;
-
-        return { success: true, publishedUrl: String(publishedUrl) };
-      }
-
-      // Direct API 실패 시 진단 정보 로깅
-      this.logger.warn(
-        `Direct API 실패 – 시도 결과: ${JSON.stringify(directApiResult.diagnostics)}`,
-      );
-      this.logger.log('UI 방식으로 전환 (CAPTCHA 재시도 포함)...');
-
-      // ── 7~10. UI 방식 발행 (fallback) ──
-      // 네트워크 요청 캡처 (재시도 루프 밖에서 셋업)
+      // 네트워크 요청 캡처 (발행 엔드포인트 디스커버리용)
       const capturedRequests: Array<{
         url: string;
         method: string;
@@ -988,7 +855,7 @@ export class BacklinkSitesService {
 
         if (hasCaptcha) {
           this.logger.warn(
-            `CAPTCHA(dkaptcha) 감지 (시도 ${publishAttempt}/${maxPublishRetries})`,
+            `CAPTCHA(dkaptcha) 감지 (시도 ${publishAttempt}/${maxPublishRetries}), 인터셉트 작동: ${dkaptchaIntercepted}`,
           );
 
           // CAPTCHA/발행 레이어 닫기
