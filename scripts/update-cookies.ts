@@ -61,9 +61,7 @@ async function main() {
     waitUntil: 'domcontentloaded',
   });
 
-  await waitForEnter(
-    '       로그인을 완료했으면 Enter를 누르세요... ',
-  );
+  await waitForEnter('       로그인을 완료했으면 Enter를 누르세요... ');
 
   const currentUrl = page.url();
   console.log(`\n[3/4] 현재 URL: ${currentUrl}`);

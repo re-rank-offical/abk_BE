@@ -99,8 +99,8 @@ export class BacklinkSitesService {
 
       try {
         const blogName =
-          (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) ||
-            [])[1] || '';
+          (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] ||
+          '';
         if (!blogName) {
           this.logger.warn(
             `[쿠키 Keep-Alive] ${site.siteName}: 블로그명 파싱 실패 (${site.siteUrl})`,
