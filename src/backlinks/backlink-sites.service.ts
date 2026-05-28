@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { Browser, BrowserContext } from 'playwright-core';
+import { Browser, BrowserContext, Page, Frame } from 'playwright-core';
 
 import {
   AuthoritySite,
@@ -932,40 +932,55 @@ export class BacklinkSitesService {
       }
       this.logger.log(`"${publishBtnClicked}" 버튼 클릭`);
 
-      // 6-5. 결과 대기: 페이지 이동(성공) or CAPTCHA(차단) 감지
+      // 6-5. 결과 대기 → CAPTCHA 감지 시 AI Vision으로 풀이
       let publishSuccess = false;
-      let captchaDetected = false;
 
-      for (let i = 0; i < 15; i++) {
-        await page.waitForTimeout(1000);
+      // 발행 직후 3초 대기
+      await page.waitForTimeout(3000);
 
-        const currentUrl = page.url();
+      // URL 변경 확인 (CAPTCHA 없이 바로 발행된 경우)
+      if (!page.url().includes('/manage/newpost')) {
+        publishSuccess = true;
+        this.logger.log(`발행 성공 (CAPTCHA 없음): ${page.url()}`);
+      }
 
-        // URL이 글쓰기 페이지에서 벗어나면 성공
-        if (!currentUrl.includes('/manage/newpost')) {
-          publishSuccess = true;
-          this.logger.log(`발행 성공: URL 변경 → ${currentUrl}`);
-          break;
-        }
-
-        // dkaptcha iframe 감지
-        if (!captchaDetected) {
-          captchaDetected = await page.evaluate(() => {
+      // CAPTCHA 감지 및 풀이 (최대 3회 시도)
+      if (!publishSuccess) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const hasCaptcha = await page.evaluate(() => {
             const iframes = document.querySelectorAll('iframe');
             for (const f of iframes) {
               if (f.src?.includes('dkaptcha')) return true;
             }
             return false;
           });
-          if (captchaDetected) {
-            this.logger.warn(`dkaptcha CAPTCHA 감지 (${i + 1}초차)`);
-          }
-        }
 
-        // CAPTCHA가 8초 이상 지속되면 포기
-        if (captchaDetected && i >= 8) {
-          this.logger.error('dkaptcha CAPTCHA 8초 이상 지속 – 자동 발행 불가');
-          break;
+          if (!hasCaptcha) break;
+
+          this.logger.log(
+            `dkaptcha CAPTCHA 감지 – AI Vision 풀이 시도 ${attempt + 1}/3`,
+          );
+          const solved = await this.solveDkaptcha(page);
+
+          if (solved) {
+            // 풀이 후 발행 완료 대기 (최대 10초)
+            for (let w = 0; w < 10; w++) {
+              await page.waitForTimeout(1000);
+              if (!page.url().includes('/manage/newpost')) {
+                publishSuccess = true;
+                this.logger.log(`CAPTCHA 풀이 후 발행 성공: ${page.url()}`);
+                break;
+              }
+            }
+            if (publishSuccess) break;
+          } else {
+            this.logger.warn(
+              `CAPTCHA 풀이 실패 (시도 ${attempt + 1}) – 새로풀기 시도`,
+            );
+            // 새로풀기 클릭 후 재시도
+            await this.resetDkaptcha(page);
+            await page.waitForTimeout(2000);
+          }
         }
       }
 
@@ -985,33 +1000,12 @@ export class BacklinkSitesService {
         return { success: true, publishedUrl };
       }
 
-      // 실패 진단
-      const diagnosis = await page.evaluate(() => {
-        const result: string[] = [];
-        document.querySelectorAll('iframe').forEach((f) => {
-          if (f.src?.includes('dkaptcha'))
-            result.push(`CAPTCHA: ${f.src.substring(0, 100)}`);
-        });
-        const buttons = document.querySelectorAll('button');
-        const btnTexts: string[] = [];
-        buttons.forEach((btn) => {
-          const t = btn.textContent?.trim();
-          if (t && (btn as HTMLElement).offsetParent !== null) {
-            btnTexts.push(`${t}(disabled=${btn.disabled})`);
-          }
-        });
-        result.push(`buttons: [${btnTexts.join('|')}]`);
-        return result.join(' | ');
-      });
-
       this.logger.error(
-        `발행 실패 [${site.siteName}]: ${captchaDetected ? 'dkaptcha CAPTCHA 감지' : '알 수 없는 원인'}. ${diagnosis}`,
+        `발행 실패 [${site.siteName}]: CAPTCHA 자동 풀이 3회 모두 실패`,
       );
       return {
         success: false,
-        error: captchaDetected
-          ? 'dkaptcha CAPTCHA가 감지되어 자동 발행이 차단되었습니다. 티스토리가 봇 방지 CAPTCHA를 강화한 것으로 보입니다. (원인: 데이터센터 IP, 짧은 세션 등)'
-          : `발행 완료되지 않음. URL: ${publishedUrl}. 진단: ${diagnosis}`,
+        error: 'dkaptcha CAPTCHA 자동 풀이에 실패했습니다 (3회 시도).',
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1043,7 +1037,11 @@ export class BacklinkSitesService {
     const proxyUser = process.env.PROXY_USERNAME;
     const proxyPass = process.env.PROXY_PASSWORD;
     const useProxy =
-      options?.useResidentialProxy && proxyHost && proxyPort && proxyUser && proxyPass;
+      options?.useResidentialProxy &&
+      proxyHost &&
+      proxyPort &&
+      proxyUser &&
+      proxyPass;
 
     this.logger.log(
       `CloakBrowser 스텔스 브라우저 실행${useProxy ? ` (Proxy: ${proxyHost}:${proxyPort})` : ''}`,
@@ -1070,9 +1068,7 @@ export class BacklinkSitesService {
           password: proxyPass,
         };
       } else if (options?.useResidentialProxy) {
-        this.logger.warn(
-          'PROXY_* 환경변수 미설정 – 프록시 없이 실행',
-        );
+        this.logger.warn('PROXY_* 환경변수 미설정 – 프록시 없이 실행');
       }
 
       return (await launch(launchOptions)) as unknown as Browser;
@@ -1081,6 +1077,275 @@ export class BacklinkSitesService {
         `브라우저 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
       );
       throw err;
+    }
+  }
+
+  // ── dkaptcha CAPTCHA 풀이 (AI Vision) ──
+
+  /**
+   * dkaptcha iframe을 찾아 AI Vision으로 퀴즈를 풀고 제출한다.
+   * @returns 풀이 성공 여부
+   */
+  private async solveDkaptcha(page: Page): Promise<boolean> {
+    try {
+      // 1. dkaptcha iframe 찾기
+      const dkFrame = await this.getDkaptchaFrame(page);
+      if (!dkFrame) {
+        this.logger.warn('dkaptcha iframe을 찾을 수 없음');
+        return false;
+      }
+
+      // 2. 퀴즈 정보 추출 (지도 이미지 URL + 빈칸 패턴)
+      const quizInfo = await dkFrame.evaluate(() => {
+        const container = document.getElementById('container_dkaptcha');
+        const imgSrc = container?.getAttribute('data-resource') || '';
+
+        const questionEl = document.querySelector('.info_question');
+        if (!questionEl) return null;
+
+        const spans = questionEl.querySelectorAll('span');
+        const parts: { text: string; isBlank: boolean }[] = [];
+        for (const span of spans) {
+          parts.push({
+            text: span.textContent || '',
+            isBlank: span.classList.contains('blank_txt'),
+          });
+        }
+
+        return { imgSrc, parts };
+      });
+
+      if (!quizInfo || !quizInfo.imgSrc) {
+        this.logger.warn('dkaptcha 퀴즈 정보 추출 실패');
+        return false;
+      }
+
+      // 3. 빈칸 개수와 알려진 텍스트 파싱
+      // 패턴 예: [빈칸][빈칸]코팰리체 → before / 오피스[빈칸][빈칸] → after
+      let blankCount = 0;
+      const textBefore: string[] = []; // 빈칸 앞에 오는 텍스트
+      const textAfter: string[] = []; // 빈칸 뒤에 오는 텍스트
+      let blankSeen = false;
+
+      for (const part of quizInfo.parts) {
+        if (part.isBlank) {
+          blankCount++;
+          blankSeen = true;
+        } else if (part.text) {
+          if (blankSeen) {
+            textAfter.push(part.text);
+          } else {
+            textBefore.push(part.text);
+          }
+        }
+      }
+      const knownBefore = textBefore.join('');
+      const knownAfter = textAfter.join('');
+      this.logger.log(
+        `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
+      );
+
+      // 4. 지도 이미지를 base64로 가져오기
+      const imgUrl = quizInfo.imgSrc.startsWith('http')
+        ? quizInfo.imgSrc
+        : `https://${quizInfo.imgSrc}`;
+      const imgBase64 = await this.fetchImageAsBase64(imgUrl);
+      if (!imgBase64) {
+        this.logger.warn('지도 이미지 다운로드 실패');
+        return false;
+      }
+
+      // 5. Claude Vision API로 빈칸 글자를 직접 읽기
+      const answer = await this.callClaudeVision(
+        imgBase64,
+        knownBefore,
+        knownAfter,
+        blankCount,
+      );
+      if (!answer) {
+        this.logger.warn('Claude Vision이 정답을 인식하지 못함');
+        return false;
+      }
+
+      this.logger.log(`Claude Vision 정답: "${answer}"`);
+
+      // 7. 답변 입력 및 제출
+      // fill() 후 input 이벤트를 발생시켜 submit 버튼을 활성화
+      await dkFrame.fill('#inpDkaptcha', answer);
+      await dkFrame.evaluate(() => {
+        const inp = document.getElementById('inpDkaptcha') as HTMLInputElement;
+        if (inp) {
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          inp.dispatchEvent(new Event('keyup', { bubbles: true }));
+          inp.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        // submit 버튼 강제 활성화 (이벤트로 안 될 경우 대비)
+        const btn = document.getElementById(
+          'btn_dkaptcha_submit',
+        ) as HTMLButtonElement;
+        if (btn) btn.disabled = false;
+      });
+      await dkFrame.waitForTimeout(500);
+
+      // 클릭 대신 JS로 직접 submit 호출 (disabled 버튼 클릭 타임아웃 방지)
+      await dkFrame.evaluate(() => {
+        const btn = document.getElementById(
+          'btn_dkaptcha_submit',
+        ) as HTMLButtonElement;
+        if (btn) {
+          btn.disabled = false;
+          btn.click();
+        }
+      });
+      await page.waitForTimeout(3000);
+
+      // 8. 결과 확인
+      const afterSubmit = await dkFrame.evaluate(() => {
+        const errorEl = document.getElementById('error');
+        const errorText = errorEl?.textContent?.trim() || '';
+        // CAPTCHA가 사라졌으면 성공
+        const container = document.getElementById('container_dkaptcha');
+        const isHidden =
+          !container ||
+          container.style.display === 'none' ||
+          container.offsetParent === null;
+        return { errorText, isHidden };
+      });
+
+      if (afterSubmit.errorText) {
+        this.logger.warn(`CAPTCHA 오답: ${afterSubmit.errorText}`);
+        return false;
+      }
+
+      // iframe이 사라졌거나 URL이 변경되었으면 성공
+      if (afterSubmit.isHidden || !page.url().includes('/manage/newpost')) {
+        return true;
+      }
+
+      // 추가 대기 후 확인
+      await page.waitForTimeout(3000);
+      return !page.url().includes('/manage/newpost');
+    } catch (err) {
+      this.logger.error(
+        `solveDkaptcha 에러: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /** dkaptcha iframe의 Frame 객체를 반환 */
+  private async getDkaptchaFrame(page: Page): Promise<Frame | null> {
+    const iframes = await page.$$('iframe');
+    for (const iframe of iframes) {
+      const src = (await iframe.getAttribute('src')) || '';
+      if (src.includes('dkaptcha')) {
+        return iframe.contentFrame();
+      }
+    }
+    return null;
+  }
+
+  /** dkaptcha "새로 풀기" 버튼 클릭 */
+  private async resetDkaptcha(page: Page): Promise<void> {
+    try {
+      const dkFrame = await this.getDkaptchaFrame(page);
+      if (dkFrame) {
+        await dkFrame.click('#btn_dkaptcha_reset');
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** 이미지 URL을 base64로 다운로드 */
+  private async fetchImageAsBase64(url: string): Promise<string | null> {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      const buf = Buffer.from(await resp.arrayBuffer());
+      return buf.toString('base64');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Claude Vision API로 지도 이미지에서 빈칸에 들어갈 글자를 직접 읽는다.
+   * @param knownBefore 빈칸 앞에 오는 알려진 텍스트 (빈칸이 맨 앞이면 빈 문자열)
+   * @param knownAfter 빈칸 뒤에 오는 알려진 텍스트 (빈칸이 맨 뒤면 빈 문자열)
+   */
+  private async callClaudeVision(
+    imgBase64: string,
+    knownBefore: string,
+    knownAfter: string,
+    blankCount: number,
+  ): Promise<string | null> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      this.logger.error('ANTHROPIC_API_KEY 환경변수 미설정');
+      return null;
+    }
+
+    const pattern = `${knownBefore}${'□'.repeat(blankCount)}${knownAfter}`;
+    const knownHint = knownBefore || knownAfter;
+
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 50,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/jpeg',
+                    data: imgBase64,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: `카카오맵 지도 이미지 CAPTCHA 퀴즈입니다.
+
+패턴: "${pattern}"
+□ 는 빈칸(각 1글자)입니다. "${knownHint}"가 포함된 장소명을 지도에서 찾아 빈칸에 들어갈 ${blankCount}글자만 답하세요.
+
+규칙:
+- 빈칸에 들어갈 글자만 답하세요 (${blankCount}글자)
+- 한글만, 공백 없이
+- 설명 없이 정답만`,
+                },
+              ],
+            },
+          ],
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        this.logger.error(`Claude API 오류: ${resp.status} ${errText}`);
+        return null;
+      }
+
+      const data = await resp.json();
+      const raw = data?.content?.[0]?.text?.trim() || '';
+      // 한글만 추출하고 blankCount 글자로 제한
+      const hangul = raw.replace(/[^가-힣]/g, '');
+      return hangul.substring(0, blankCount) || null;
+    } catch (err) {
+      this.logger.error(
+        `Claude Vision 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
   }
 
