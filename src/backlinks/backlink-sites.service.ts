@@ -1302,7 +1302,9 @@ export class BacklinkSitesService {
 
       // 4-2. 다운로드 실패 시 iframe 스크린샷 (UI 포함되지만 차선책)
       if (!imgBase64) {
-        this.logger.warn('지도 이미지 다운로드 실패 – iframe 스크린샷 fallback');
+        this.logger.warn(
+          '지도 이미지 다운로드 실패 – iframe 스크린샷 fallback',
+        );
         try {
           const iframes = await page.$$('iframe');
           for (const iframe of iframes) {
