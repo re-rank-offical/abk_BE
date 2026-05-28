@@ -1280,43 +1280,46 @@ export class BacklinkSitesService {
         `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
       );
 
-      // 4. CAPTCHA 지도 이미지 획득 (iframe 스크린샷 우선 → data-resource fallback)
+      // 4. CAPTCHA 지도 이미지 획득 (순수 지도 이미지 우선 → iframe 스크린샷 fallback)
       let imgBase64: string | null = null;
       let mediaType: 'image/jpeg' | 'image/png' = 'image/png';
 
-      // 4-1. dkaptcha iframe 요소 스크린샷 (브라우저 렌더링 품질, 가장 정확)
-      try {
-        const iframes = await page.$$('iframe');
-        for (const iframe of iframes) {
-          const src = (await iframe.getAttribute('src')) || '';
-          if (src.includes('dkaptcha')) {
-            const screenshotBuf = await iframe.screenshot({ type: 'png' });
-            imgBase64 = screenshotBuf.toString('base64');
-            mediaType = 'image/png';
-            this.logger.log(
-              `dkaptcha iframe 스크린샷 성공 (${Math.round(screenshotBuf.length / 1024)}KB)`,
-            );
-            break;
-          }
-        }
-      } catch (e) {
-        this.logger.warn(
-          `iframe 스크린샷 실패: ${e instanceof Error ? e.message : String(e)}`,
-        );
-      }
-
-      // 4-2. 스크린샷 실패 시 data-resource URL로 이미지 다운로드
-      if (!imgBase64) {
+      // 4-1. data-resource URL로 순수 지도 이미지 다운로드 (UI 없이 지도만, 가장 정확)
+      if (quizInfo.imgSrc) {
         const imgUrl = quizInfo.imgSrc.startsWith('http')
           ? quizInfo.imgSrc
           : `https://${quizInfo.imgSrc}`;
-        this.logger.log(`data-resource URL로 이미지 다운로드 시도: ${imgUrl}`);
+        this.logger.log(`지도 이미지 직접 다운로드: ${imgUrl}`);
         const downloaded = await this.fetchImageAsBase64(imgUrl);
         if (downloaded) {
           imgBase64 = downloaded.base64;
           mediaType = downloaded.mediaType;
           this.logger.log(
-            `이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round((downloaded.base64.length * 0.75) / 1024)}KB)`,
+            `지도 이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round((downloaded.base64.length * 0.75) / 1024)}KB)`,
+          );
+        }
+      }
+
+      // 4-2. 다운로드 실패 시 iframe 스크린샷 (UI 포함되지만 차선책)
+      if (!imgBase64) {
+        this.logger.warn('지도 이미지 다운로드 실패 – iframe 스크린샷 fallback');
+        try {
+          const iframes = await page.$$('iframe');
+          for (const iframe of iframes) {
+            const src = (await iframe.getAttribute('src')) || '';
+            if (src.includes('dkaptcha')) {
+              const screenshotBuf = await iframe.screenshot({ type: 'png' });
+              imgBase64 = screenshotBuf.toString('base64');
+              mediaType = 'image/png';
+              this.logger.log(
+                `iframe 스크린샷 fallback 성공 (${Math.round(screenshotBuf.length / 1024)}KB)`,
+              );
+              break;
+            }
+          }
+        } catch (e) {
+          this.logger.warn(
+            `iframe 스크린샷 실패: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
       }
