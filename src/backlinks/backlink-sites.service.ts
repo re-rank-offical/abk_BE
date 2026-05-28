@@ -89,9 +89,7 @@ export class BacklinkSitesService {
     const wpSites = sites.filter(
       (s) => s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl,
     );
-    const tistorySites = sites.filter(
-      (s) => s.siteType === SiteType.TISTORY,
-    );
+    const tistorySites = sites.filter((s) => s.siteType === SiteType.TISTORY);
     const otherSites = sites.filter(
       (s) =>
         !(s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl) &&
@@ -102,9 +100,7 @@ export class BacklinkSitesService {
 
     // 1) WordPress – 전부 즉시 병렬 (API 호출, 딜레이 불필요)
     if (wpSites.length > 0) {
-      this.logger.log(
-        `WordPress ${wpSites.length}개 사이트 병렬 발행 시작`,
-      );
+      this.logger.log(`WordPress ${wpSites.length}개 사이트 병렬 발행 시작`);
       const wpPromises = wpSites.map((site) =>
         this.publishAndSave(site, title, body, userId),
       );
@@ -113,9 +109,7 @@ export class BacklinkSitesService {
 
     // 2) 기타 (LinkedIn 등) – 병렬 발행
     if (otherSites.length > 0) {
-      this.logger.log(
-        `기타 ${otherSites.length}개 사이트 병렬 발행 시작`,
-      );
+      this.logger.log(`기타 ${otherSites.length}개 사이트 병렬 발행 시작`);
       const otherPromises = otherSites.map((site) =>
         this.publishAndSave(site, title, body, userId),
       );
@@ -478,7 +472,9 @@ export class BacklinkSitesService {
         }
       } else {
         // 쿠키 없으면 전체 워밍업
-        this.logger.log(`세션 쿠키 없음 – 전체 워밍업 시작 (blog: ${blogName})`);
+        this.logger.log(
+          `세션 쿠키 없음 – 전체 워밍업 시작 (blog: ${blogName})`,
+        );
         try {
           await page.goto('https://www.tistory.com/', {
             waitUntil: 'domcontentloaded',
@@ -1197,7 +1193,12 @@ export class BacklinkSitesService {
         const imgSrc = container?.getAttribute('data-resource') || '';
 
         const questionEl = document.querySelector('.info_question');
-        if (!questionEl) return { imgSrc, parts: [] as { text: string; isBlank: boolean }[], fullText: '' };
+        if (!questionEl)
+          return {
+            imgSrc,
+            parts: [] as { text: string; isBlank: boolean }[],
+            fullText: '',
+          };
 
         const spans = questionEl.querySelectorAll('span');
         const parts: { text: string; isBlank: boolean }[] = [];
@@ -1282,7 +1283,7 @@ export class BacklinkSitesService {
           imgBase64 = downloaded.base64;
           mediaType = downloaded.mediaType;
           this.logger.log(
-            `이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round(downloaded.base64.length * 0.75 / 1024)}KB)`,
+            `이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round((downloaded.base64.length * 0.75) / 1024)}KB)`,
           );
         }
       }
@@ -1549,9 +1550,10 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
             matchedName.endsWith(knownAfter)
           ) {
             const afterLen = knownAfter.length || 0;
-            const extracted = afterLen > 0
-              ? matchedName.slice(knownBefore.length, -afterLen)
-              : matchedName.slice(knownBefore.length);
+            const extracted =
+              afterLen > 0
+                ? matchedName.slice(knownBefore.length, -afterLen)
+                : matchedName.slice(knownBefore.length);
             if (extracted.length === blankCount) {
               candidate = extracted;
               this.logger.log(
