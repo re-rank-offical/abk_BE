@@ -977,9 +977,9 @@ export class BacklinkSitesService {
             this.logger.warn(
               `CAPTCHA 풀이 실패 (시도 ${attempt + 1}) – 새로풀기 시도`,
             );
-            // 새로풀기 클릭 후 재시도 (새 문제 로드 대기)
+            // 새로풀기 클릭 후 새 문제 로드 대기
             await this.resetDkaptcha(page);
-            await page.waitForTimeout(3000 + Math.floor(Math.random() * 2000));
+            await page.waitForTimeout(4000 + Math.floor(Math.random() * 3000));
           }
         }
       }
@@ -1096,12 +1096,27 @@ export class BacklinkSitesService {
         return false;
       }
 
-      // iframe 내 콘텐츠 로드 대기
-      try {
-        await dkFrame.waitForSelector('#container_dkaptcha', { timeout: 5000 });
-        await dkFrame.waitForSelector('.info_question', { timeout: 5000 });
-      } catch {
-        this.logger.warn('dkaptcha 컨테이너/질문 로드 대기 타임아웃');
+      // iframe 내 콘텐츠 로드 대기 (최대 2회 시도)
+      let iframeLoaded = false;
+      for (let loadAttempt = 0; loadAttempt < 2; loadAttempt++) {
+        try {
+          await dkFrame.waitForSelector('#container_dkaptcha', {
+            timeout: 8000,
+          });
+          await dkFrame.waitForSelector('.info_question', { timeout: 5000 });
+          iframeLoaded = true;
+          break;
+        } catch {
+          this.logger.warn(
+            `dkaptcha 로드 대기 ${loadAttempt + 1}/2 타임아웃 – 추가 대기`,
+          );
+          await page.waitForTimeout(3000);
+        }
+      }
+
+      if (!iframeLoaded) {
+        this.logger.warn('dkaptcha iframe 콘텐츠 로드 실패');
+        return false;
       }
 
       // 2. 퀴즈 정보 추출 (지도 이미지 URL + 빈칸 패턴)
@@ -1110,7 +1125,7 @@ export class BacklinkSitesService {
         const imgSrc = container?.getAttribute('data-resource') || '';
 
         const questionEl = document.querySelector('.info_question');
-        if (!questionEl) return null;
+        if (!questionEl) return { imgSrc, parts: [] as { text: string; isBlank: boolean }[], fullText: '' };
 
         const spans = questionEl.querySelectorAll('span');
         const parts: { text: string; isBlank: boolean }[] = [];
@@ -1121,13 +1136,12 @@ export class BacklinkSitesService {
           });
         }
 
-        // 전체 퀴즈 텍스트도 수집 (디버깅용)
         const fullText = questionEl.textContent || '';
 
         return { imgSrc, parts, fullText };
       });
 
-      if (!quizInfo || !quizInfo.imgSrc) {
+      if (!quizInfo || quizInfo.parts.length === 0) {
         this.logger.warn(
           `dkaptcha 퀴즈 정보 추출 실패 (imgSrc=${quizInfo?.imgSrc || 'none'}, parts=${quizInfo?.parts?.length || 0})`,
         );
@@ -1392,27 +1406,34 @@ export class BacklinkSitesService {
                 },
                 {
                   type: 'text',
-                  text: `이 카카오맵 지도 이미지에서 장소명을 읽어 CAPTCHA 퀴즈를 풀어야 합니다.
+                  text: `카카오맵 지도 이미지에서 장소명을 읽어 CAPTCHA 퀴즈를 풀어야 합니다.
 
-퀴즈 패턴: "${pattern}"
-(□ = 빈칸, 각 1글자. 총 ${blankCount}글자를 채워야 합니다)
+## 퀴즈
+패턴: "${pattern}"
+- □ 는 빈칸(각 1글자). 총 ${blankCount}글자를 채워야 합니다.
+- 앞부분: "${knownBefore}" / 뒷부분: "${knownAfter}"
+- 정답 = "${knownBefore}" + [${blankCount}글자 정답] + "${knownAfter}" → 이 전체가 지도에 보이는 장소명
 
-${knownBefore ? `알려진 앞부분: "${knownBefore}"` : ''}${knownAfter ? `\n알려진 뒷부분: "${knownAfter}"` : ''}
-
-## 풀이 방법
-1. 지도 이미지에서 보이는 모든 장소명/건물명을 찾아 나열하세요.
-2. 나열한 장소명 중 "${knownBefore || knownAfter}"가 포함된 것을 찾으세요.
-3. 해당 장소명에서 빈칸(□)에 들어갈 ${blankCount}글자를 추출하세요.
+## 중요 규칙
+- 정답은 반드시 정확히 ${blankCount}글자여야 합니다.
+- "${knownBefore}" + 정답 + "${knownAfter}" 를 합치면 지도에 실제로 적힌 장소명이 되어야 합니다.
+- 글자 수가 안 맞으면 다른 장소명을 찾으세요.
 
 ## 예시
-- 패턴 "한국□□학교", 지도에서 "한국대학교" 발견 → 답: 대학
-- 패턴 "□□프라자", 지도에서 "코스프라자" 발견 → 답: 코스
-- 패턴 "서울□□병원", 지도에서 "서울대학병원" 발견 → 답: 대학
+- 패턴 "경□□박물관" (2칸), 지도에 "경기도박물관" → 답: 기도 (경+기도+박물관=경기도박물관, 6글자 ✓)
+- 패턴 "□□프라자" (2칸), 지도에 "코아프라자" → 답: 코아 (코아+프라자=코아프라자, 5글자 ✓)
+- 패턴 "한국□□학교" (2칸), 지도에 "한국중학교" → 답은 "중학"이 아님! 한국+중학+학교=한국중학학교(7글자)는 틀림. 지도에서 "한국대중학교"를 찾으면 답: 대중 ✓
 
-## 출력 형식
-PLACES: [보이는 장소명들 쉼표 구분]
-MATCH: [패턴과 일치하는 장소명]
-ANSWER: [빈칸에 들어갈 ${blankCount}글자만]`,
+## 풀이
+1. 지도에서 보이는 모든 장소명을 정확하게 읽어 나열하세요.
+2. 각 장소명에 대해 "${knownBefore}"로 시작하고 "${knownAfter}"로 끝나는지 확인하세요.
+3. "${knownBefore}"와 "${knownAfter}" 사이의 글자가 정확히 ${blankCount}개인 장소명을 찾으세요.
+4. 그 ${blankCount}글자만 답하세요.
+
+## 출력
+PLACES: [지도에 보이는 장소명들]
+MATCH: [패턴과 일치하는 장소명 전체]
+ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
                 },
               ],
             },
@@ -1432,18 +1453,54 @@ ANSWER: [빈칸에 들어갈 ${blankCount}글자만]`,
 
       // ANSWER: 라인에서 정답 추출
       const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
+      let candidate: string | null = null;
+
       if (answerMatch) {
         const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
-        if (hangul.length >= blankCount) {
-          return hangul.substring(0, blankCount);
+        if (hangul.length === blankCount) {
+          candidate = hangul;
+        } else {
+          this.logger.warn(
+            `ANSWER 글자수 불일치: "${hangul}" (${hangul.length}글자, 필요: ${blankCount})`,
+          );
         }
       }
 
-      // fallback: 마지막 줄에서 한글 추출
-      const lines = raw.split('\n').filter((l: string) => l.trim());
-      const lastLine = lines[lines.length - 1] || '';
-      const hangul = lastLine.replace(/[^가-힣]/g, '');
-      return hangul.substring(0, blankCount) || null;
+      // fallback: MATCH 라인에서 패턴 매칭으로 추출
+      if (!candidate) {
+        const matchLine = raw.match(/MATCH:\s*(.+)/i);
+        if (matchLine) {
+          const matchedName = matchLine[1].replace(/[^가-힣]/g, '');
+          // knownBefore + answer + knownAfter = matchedName
+          if (
+            matchedName.startsWith(knownBefore) &&
+            matchedName.endsWith(knownAfter)
+          ) {
+            const afterLen = knownAfter.length || 0;
+            const extracted = afterLen > 0
+              ? matchedName.slice(knownBefore.length, -afterLen)
+              : matchedName.slice(knownBefore.length);
+            if (extracted.length === blankCount) {
+              candidate = extracted;
+              this.logger.log(
+                `MATCH에서 정답 추출: "${matchedName}" → "${candidate}"`,
+              );
+            }
+          }
+        }
+      }
+
+      // fallback: 마지막 줄에서 한글 추출 (정확히 blankCount일 때만)
+      if (!candidate) {
+        const lines = raw.split('\n').filter((l: string) => l.trim());
+        const lastLine = lines[lines.length - 1] || '';
+        const hangul = lastLine.replace(/[^가-힣]/g, '');
+        if (hangul.length === blankCount) {
+          candidate = hangul;
+        }
+      }
+
+      return candidate;
     } catch (err) {
       this.logger.error(
         `Claude Vision 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
