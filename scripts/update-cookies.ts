@@ -102,20 +102,28 @@ async function main() {
 
   await client.connect();
 
+  // 먼저 DB에 어떤 TISTORY 사이트가 있는지 확인
+  const allSites = await client.query(
+    `SELECT "id", "siteName", "siteUrl" FROM authority_sites WHERE "siteType" = 'TISTORY'`,
+  );
+  console.log(`       DB 내 TISTORY 사이트 ${allSites.rowCount}개:`);
+  for (const row of allSites.rows) {
+    console.log(`         - ${row.siteName} (${row.siteUrl})`);
+  }
+
+  // siteUrl 또는 siteName으로 매칭 시도
   const result = await client.query(
     `UPDATE authority_sites
      SET "sessionCookies" = $1
-     WHERE "siteUrl" LIKE $2 AND "siteType" = 'TISTORY'
+     WHERE ("siteUrl" LIKE $2 OR "siteName" LIKE $3) AND "siteType" = 'TISTORY'
      RETURNING "id", "siteName", "siteUrl"`,
-    [cookieJson, `%${blogName}.tistory.com%`],
+    [cookieJson, `%${blogName}%`, `%${blogName}%`],
   );
 
   await client.end();
 
   if (result.rowCount === 0) {
-    console.error(
-      `\n❌ "${blogName}.tistory.com" 사이트를 DB에서 찾지 못했습니다.`,
-    );
+    console.error(`\n❌ "${blogName}" 사이트를 DB에서 찾지 못했습니다.`);
     console.log(`   추출된 쿠키 JSON (수동 저장용):\n`);
     console.log(cookieJson.substring(0, 200) + '...');
     process.exit(1);
