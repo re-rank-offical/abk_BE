@@ -17,6 +17,7 @@ import { UpdateAuthoritySiteDto } from './dto/update-authority-site.dto';
 @Injectable()
 export class BacklinkSitesService {
   private readonly logger = new Logger(BacklinkSitesService.name);
+  private proxyIndex = 0;
 
   constructor(
     @InjectRepository(AuthoritySite)
@@ -1155,22 +1156,56 @@ export class BacklinkSitesService {
 
   // ── 유틸리티 ──
 
+  /** PROXY_HOSTS에서 다음 프록시를 round-robin으로 선택 */
+  private pickNextProxy(): {
+    host: string;
+    port: string;
+    username: string;
+    password: string;
+  } | null {
+    const hostsRaw = process.env.PROXY_HOSTS; // "ip1,ip2,ip3,..."
+    const proxyUser = process.env.PROXY_USERNAME;
+    const proxyPass = process.env.PROXY_PASSWORD;
+    const proxyPort = process.env.PROXY_PORT || '50100';
+
+    if (hostsRaw && proxyUser && proxyPass) {
+      const hosts = hostsRaw
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
+      if (hosts.length > 0) {
+        const host = hosts[this.proxyIndex % hosts.length];
+        this.proxyIndex++;
+        return {
+          host,
+          port: proxyPort,
+          username: proxyUser,
+          password: proxyPass,
+        };
+      }
+    }
+
+    // fallback: 단일 PROXY_HOST
+    const singleHost = process.env.PROXY_HOST;
+    if (singleHost && proxyUser && proxyPass) {
+      return {
+        host: singleHost,
+        port: proxyPort,
+        username: proxyUser,
+        password: proxyPass,
+      };
+    }
+
+    return null;
+  }
+
   private async createBrowser(options?: {
     useResidentialProxy?: boolean;
   }): Promise<Browser> {
-    const proxyHost = process.env.PROXY_HOST;
-    const proxyPort = process.env.PROXY_PORT;
-    const proxyUser = process.env.PROXY_USERNAME;
-    const proxyPass = process.env.PROXY_PASSWORD;
-    const useProxy =
-      options?.useResidentialProxy &&
-      proxyHost &&
-      proxyPort &&
-      proxyUser &&
-      proxyPass;
+    const proxy = options?.useResidentialProxy ? this.pickNextProxy() : null;
 
     this.logger.log(
-      `CloakBrowser 스텔스 브라우저 실행${useProxy ? ` (Proxy: ${proxyHost}:${proxyPort})` : ''}`,
+      `CloakBrowser 스텔스 브라우저 실행${proxy ? ` (Proxy: ${proxy.host}:${proxy.port})` : ''}`,
     );
 
     try {
@@ -1187,11 +1222,11 @@ export class BacklinkSitesService {
         ],
       };
 
-      if (useProxy) {
+      if (proxy) {
         launchOptions.proxy = {
-          server: `http://${proxyHost}:${proxyPort}`,
-          username: proxyUser,
-          password: proxyPass,
+          server: `http://${proxy.host}:${proxy.port}`,
+          username: proxy.username,
+          password: proxy.password,
         };
       } else if (options?.useResidentialProxy) {
         this.logger.warn('PROXY_* 환경변수 미설정 – 프록시 없이 실행');
