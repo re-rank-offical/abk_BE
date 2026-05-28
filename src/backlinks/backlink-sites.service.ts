@@ -977,9 +977,9 @@ export class BacklinkSitesService {
             this.logger.warn(
               `CAPTCHA 풀이 실패 (시도 ${attempt + 1}) – 새로풀기 시도`,
             );
-            // 새로풀기 클릭 후 재시도
+            // 새로풀기 클릭 후 재시도 (새 문제 로드 대기)
             await this.resetDkaptcha(page);
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(3000 + Math.floor(Math.random() * 2000));
           }
         }
       }
@@ -1160,15 +1160,50 @@ export class BacklinkSitesService {
         `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
       );
 
-      // 4. 지도 이미지를 base64로 가져오기 (실패 시 스크린샷 fallback)
-      const imgUrl = quizInfo.imgSrc.startsWith('http')
-        ? quizInfo.imgSrc
-        : `https://${quizInfo.imgSrc}`;
-      let imgBase64 = await this.fetchImageAsBase64(imgUrl);
-      let mediaType: 'image/jpeg' | 'image/png' = 'image/jpeg';
+      // 4. CAPTCHA 지도 이미지 획득 (iframe 스크린샷 우선 → data-resource fallback)
+      let imgBase64: string | null = null;
+      let mediaType: 'image/jpeg' | 'image/png' = 'image/png';
 
+      // 4-1. dkaptcha iframe 요소 스크린샷 (브라우저 렌더링 품질, 가장 정확)
+      try {
+        const iframes = await page.$$('iframe');
+        for (const iframe of iframes) {
+          const src = (await iframe.getAttribute('src')) || '';
+          if (src.includes('dkaptcha')) {
+            const screenshotBuf = await iframe.screenshot({ type: 'png' });
+            imgBase64 = screenshotBuf.toString('base64');
+            mediaType = 'image/png';
+            this.logger.log(
+              `dkaptcha iframe 스크린샷 성공 (${Math.round(screenshotBuf.length / 1024)}KB)`,
+            );
+            break;
+          }
+        }
+      } catch (e) {
+        this.logger.warn(
+          `iframe 스크린샷 실패: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      // 4-2. 스크린샷 실패 시 data-resource URL로 이미지 다운로드
       if (!imgBase64) {
-        this.logger.warn('지도 이미지 다운로드 실패 – 스크린샷 fallback');
+        const imgUrl = quizInfo.imgSrc.startsWith('http')
+          ? quizInfo.imgSrc
+          : `https://${quizInfo.imgSrc}`;
+        this.logger.log(`data-resource URL로 이미지 다운로드 시도: ${imgUrl}`);
+        const downloaded = await this.fetchImageAsBase64(imgUrl);
+        if (downloaded) {
+          imgBase64 = downloaded.base64;
+          mediaType = downloaded.mediaType;
+          this.logger.log(
+            `이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round(downloaded.base64.length * 0.75 / 1024)}KB)`,
+          );
+        }
+      }
+
+      // 4-3. 전체 페이지 스크린샷 최종 fallback
+      if (!imgBase64) {
+        this.logger.warn('이미지 획득 실패 – 전체 페이지 스크린샷 fallback');
         try {
           const screenshotBuf = await page.screenshot({ type: 'png' });
           imgBase64 = screenshotBuf.toString('base64');
@@ -1282,14 +1317,32 @@ export class BacklinkSitesService {
     }
   }
 
-  /** 이미지 URL을 base64로 다운로드 */
-  private async fetchImageAsBase64(url: string): Promise<string | null> {
+  /** 이미지 URL을 base64로 다운로드 (content-type 감지 포함) */
+  private async fetchImageAsBase64(
+    url: string,
+  ): Promise<{ base64: string; mediaType: 'image/jpeg' | 'image/png' } | null> {
     try {
-      const resp = await fetch(url);
-      if (!resp.ok) return null;
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Referer: 'https://tistory.com/',
+        },
+      });
+      if (!resp.ok) {
+        this.logger.warn(`이미지 다운로드 HTTP ${resp.status}: ${url}`);
+        return null;
+      }
+      const contentType = resp.headers.get('content-type') || '';
+      const mediaType: 'image/jpeg' | 'image/png' = contentType.includes('png')
+        ? 'image/png'
+        : 'image/jpeg';
       const buf = Buffer.from(await resp.arrayBuffer());
-      return buf.toString('base64');
-    } catch {
+      return { base64: buf.toString('base64'), mediaType };
+    } catch (err) {
+      this.logger.warn(
+        `이미지 다운로드 실패: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     }
   }
@@ -1387,7 +1440,7 @@ ANSWER: [빈칸에 들어갈 ${blankCount}글자만]`,
       }
 
       // fallback: 마지막 줄에서 한글 추출
-      const lines = raw.split('\n').filter((l) => l.trim());
+      const lines = raw.split('\n').filter((l: string) => l.trim());
       const lastLine = lines[lines.length - 1] || '';
       const hangul = lastLine.replace(/[^가-힣]/g, '');
       return hangul.substring(0, blankCount) || null;
