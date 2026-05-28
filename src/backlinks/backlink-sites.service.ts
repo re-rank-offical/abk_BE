@@ -1045,9 +1045,9 @@ export class BacklinkSitesService {
         this.logger.log(`발행 성공 (CAPTCHA 없음): ${page.url()}`);
       }
 
-      // CAPTCHA 감지 및 풀이 (최대 5회 시도)
+      // CAPTCHA 감지 및 풀이 (최대 10회 시도)
       if (!publishSuccess) {
-        for (let attempt = 0; attempt < 5; attempt++) {
+        for (let attempt = 0; attempt < 10; attempt++) {
           const hasCaptcha = await page.evaluate(() => {
             const iframes = document.querySelectorAll('iframe');
             for (const f of iframes) {
@@ -1059,7 +1059,7 @@ export class BacklinkSitesService {
           if (!hasCaptcha) break;
 
           this.logger.log(
-            `dkaptcha CAPTCHA 감지 – AI Vision 풀이 시도 ${attempt + 1}/3`,
+            `dkaptcha CAPTCHA 감지 – AI Vision 풀이 시도 ${attempt + 1}/10`,
           );
           const solved = await this.solveDkaptcha(page);
 
@@ -1102,11 +1102,11 @@ export class BacklinkSitesService {
       }
 
       this.logger.error(
-        `발행 실패 [${site.siteName}]: CAPTCHA 자동 풀이 5회 모두 실패`,
+        `발행 실패 [${site.siteName}]: CAPTCHA 자동 풀이 10회 모두 실패`,
       );
       return {
         success: false,
-        error: 'dkaptcha CAPTCHA 자동 풀이에 실패했습니다 (5회 시도).',
+        error: 'dkaptcha CAPTCHA 자동 풀이에 실패했습니다 (10회 시도).',
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1580,7 +1580,9 @@ export class BacklinkSitesService {
 ## 예시
 - 패턴 "경□□박물관" (2칸), 지도에 "경기도박물관" → 답: 기도 (경+기도+박물관=경기도박물관, 6글자 ✓)
 - 패턴 "□□프라자" (2칸), 지도에 "코아프라자" → 답: 코아 (코아+프라자=코아프라자, 5글자 ✓)
-- 패턴 "한국□□학교" (2칸), 지도에 "한국중학교" → 답은 "중학"이 아님! 한국+중학+학교=한국중학학교(7글자)는 틀림. 지도에서 "한국대중학교"를 찾으면 답: 대중 ✓
+- 패턴 "G□□5" (2칸), 지도에 "GS25" → 답: S2 (G+S2+5=GS25, 4글자 ✓)
+- 패턴 "□□프레소" (2칸), 지도에 "에스프레소" → 답: 에스
+- 주의: 정답에 한글, 영문, 숫자 모두 올 수 있습니다.
 
 ## 풀이
 1. 지도에서 보이는 모든 장소명을 정확하게 읽어 나열하세요.
@@ -1620,9 +1622,7 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
 
       // 글자수 불일치 시 – MATCH에서 찾은 장소명을 힌트로 2차 집중 질문
       const matchLine = raw.match(/MATCH:\s*(.+)/i);
-      const firstMatchName = matchLine
-        ? matchLine[1].replace(/[^가-힣]/g, '')
-        : null;
+      const firstMatchName = matchLine ? this.stripNoise(matchLine[1]) : null;
 
       if (firstMatchName) {
         this.logger.log(
@@ -1649,6 +1649,11 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
   }
 
   /** 1차 응답에서 ANSWER/MATCH/마지막줄 순으로 정답 추출 */
+  /** 응답 텍스트에서 불필요한 기호만 제거 (한글/영문/숫자 유지) */
+  private stripNoise(text: string): string {
+    return text.replace(/[^가-힣a-zA-Z0-9]/g, '');
+  }
+
   private extractAnswer(
     raw: string,
     knownBefore: string,
@@ -1658,17 +1663,17 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
     // ANSWER: 라인
     const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
     if (answerMatch) {
-      const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
-      if (hangul.length === blankCount) return hangul;
+      const cleaned = this.stripNoise(answerMatch[1]);
+      if (cleaned.length === blankCount) return cleaned;
       this.logger.warn(
-        `ANSWER 글자수 불일치: "${hangul}" (${hangul.length}글자, 필요: ${blankCount})`,
+        `ANSWER 글자수 불일치: "${cleaned}" (${cleaned.length}글자, 필요: ${blankCount})`,
       );
     }
 
     // MATCH: 라인에서 패턴 매칭
     const matchLine = raw.match(/MATCH:\s*(.+)/i);
     if (matchLine) {
-      const matchedName = matchLine[1].replace(/[^가-힣]/g, '');
+      const matchedName = this.stripNoise(matchLine[1]);
       if (
         matchedName.startsWith(knownBefore) &&
         matchedName.endsWith(knownAfter)
@@ -1687,11 +1692,11 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
       }
     }
 
-    // 마지막 줄에서 한글 추출
+    // 마지막 줄에서 추출
     const lines = raw.split('\n').filter((l: string) => l.trim());
     const lastLine = lines[lines.length - 1] || '';
-    const hangul = lastLine.replace(/[^가-힣]/g, '');
-    if (hangul.length === blankCount) return hangul;
+    const cleaned = this.stripNoise(lastLine);
+    if (cleaned.length === blankCount) return cleaned;
 
     return null;
   }
@@ -1761,18 +1766,18 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       // ANSWER 추출
       const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
       if (answerMatch) {
-        const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
-        if (hangul.length === blankCount) {
-          this.logger.log(`2차 재검사 성공: "${hangul}"`);
-          return hangul;
+        const cleaned = this.stripNoise(answerMatch[1]);
+        if (cleaned.length === blankCount) {
+          this.logger.log(`2차 재검사 성공: "${cleaned}"`);
+          return cleaned;
         }
       }
 
-      // 전체에서 정확히 blankCount 한글 추출
-      const allHangul = raw.replace(/[^가-힣]/g, '');
+      // 전체에서 정확히 blankCount 글자 추출
+      const allCleaned = this.stripNoise(raw);
       // 마지막 blankCount 글자 시도
-      if (allHangul.length >= blankCount) {
-        const tail = allHangul.slice(-blankCount);
+      if (allCleaned.length >= blankCount) {
+        const tail = allCleaned.slice(-blankCount);
         this.logger.log(`2차 재검사 tail 추출: "${tail}"`);
         return tail;
       }
