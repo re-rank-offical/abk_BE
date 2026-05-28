@@ -132,6 +132,10 @@ export class BacklinkSitesService {
     if (site.siteType === SiteType.TISTORY) {
       return this.publishViaTistory(site, title, body);
     }
+    if (site.siteType === SiteType.LINKEDIN) {
+      return this.publishViaPlaywright(site, title, body);
+    }
+    // CUSTOM (레거시) 또는 알 수 없는 타입
     return this.publishViaPlaywright(site, title, body);
   }
 
