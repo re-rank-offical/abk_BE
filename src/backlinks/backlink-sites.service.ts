@@ -219,12 +219,14 @@ export class BacklinkSitesService {
     }
 
     // 이전 발행이 끝날 때까지 대기 후 실행 (글 단위 직렬화)
-    this.publishMutex = this.publishMutex.then(
-      () => this.processPublishInBackground(sites, postMap, title, body),
-      () => this.processPublishInBackground(sites, postMap, title, body),
-    ).catch((err) => {
-      this.logger.error('백그라운드 발행 중 예외 발생', err);
-    });
+    this.publishMutex = this.publishMutex
+      .then(
+        () => this.processPublishInBackground(sites, postMap, title, body),
+        () => this.processPublishInBackground(sites, postMap, title, body),
+      )
+      .catch((err) => {
+        this.logger.error('백그라운드 발행 중 예외 발생', err);
+      });
 
     // 3) PENDING 레코드를 즉시 반환 (HTTP 응답 즉시 완료)
     return pendingPosts;
@@ -246,12 +248,15 @@ export class BacklinkSitesService {
     );
     const tistorySites = sites.filter((s) => s.siteType === SiteType.TISTORY);
     const otherSites = sites.filter(
-      (s) => s.siteType !== SiteType.WORDPRESS && s.siteType !== SiteType.TISTORY,
+      (s) =>
+        s.siteType !== SiteType.WORDPRESS && s.siteType !== SiteType.TISTORY,
     );
 
     // 1) WordPress REST API – 전부 즉시 병렬 (브라우저 불필요)
     if (wpApiSites.length > 0) {
-      this.logger.log(`WordPress API ${wpApiSites.length}개 사이트 병렬 발행 시작`);
+      this.logger.log(
+        `WordPress API ${wpApiSites.length}개 사이트 병렬 발행 시작`,
+      );
       await Promise.all(
         wpApiSites.map((site) =>
           this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
@@ -1881,8 +1886,8 @@ export class BacklinkSitesService {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model: 'claude-opus-4-20250514',
-          max_tokens: 300,
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 200,
           messages: [
             {
               role: 'user',
@@ -1897,45 +1902,18 @@ export class BacklinkSitesService {
                 },
                 {
                   type: 'text',
-                  text: `카카오맵 지도 이미지에서 장소명을 읽어 CAPTCHA 퀴즈를 풀어야 합니다.
+                  text: `카카오맵 CAPTCHA입니다. 지도 중앙의 빨간 마커(핀)가 가리키는 장소명을 읽으세요.
 
-## 퀴즈
-패턴: "${pattern}"
-- □ 는 빈칸(각 1글자). 총 ${blankCount}글자를 채워야 합니다.
-- 앞부분: "${knownBefore}" / 뒷부분: "${knownAfter}"
-- 정답 = "${knownBefore}" + [${blankCount}글자 정답] + "${knownAfter}" → 이 전체가 지도에 보이는 장소명
+패턴: "${pattern}" (□=${blankCount}글자 빈칸)
+"${knownBefore}" + 정답(${blankCount}글자) + "${knownAfter}" = 마커가 가리키는 장소명
 
-## 정답 찾는 핵심
-- 지도 중앙에 빨간 마커(핀)가 있습니다. **마커가 가리키는 장소명이 정답**입니다.
-- 마커 바로 옆이나 위에 적힌 텍스트를 우선으로 읽으세요.
-- 지도 주변부의 다른 장소명은 무시해도 됩니다.
+지도에 보이는 모든 장소명을 나열한 뒤, 마커 위치의 장소명에서 빈칸에 해당하는 ${blankCount}글자를 찾으세요.
+검증: "${knownBefore}" + 정답 + "${knownAfter}"를 합쳐서 지도에 적힌 장소명과 완전히 일치해야 합니다.
 
-## 중요 규칙
-- 정답은 반드시 정확히 ${blankCount}글자여야 합니다.
-- "${knownBefore}" + 정답 + "${knownAfter}" 를 합치면 마커가 가리키는 장소명이 되어야 합니다.
-- 정답에 한글, 영문, 숫자 모두 올 수 있습니다.
-- 글자 수가 안 맞으면 읽은 것을 다시 확인하세요.
-
-## 흔한 실수
-- 패턴 "오이삼[□□]탕"에서 "삼계탕"을 찾아 "계탕"이라 답하면 → "오이삼계탕탕"이 되어 틀림! 뒷부분("탕")이 중복되지 않는지 반드시 검증하세요.
-- "${knownBefore}" + 정답 + "${knownAfter}"를 이어붙인 결과가 지도에 그대로 적혀있어야 합니다.
-
-## 예시
-- 패턴 "경□□박물관" (2칸), 마커 장소 "경기도박물관" → 답: 기도 (경+기도+박물관=경기도박물관 ✓)
-- 패턴 "□□프라자" (2칸), 마커 장소 "코아프라자" → 답: 코아 (코아+프라자=코아프라자 ✓)
-- 패턴 "G□□5" (2칸), 마커 장소 "GS25" → 답: S2 (G+S2+5=GS25 ✓)
-
-## 풀이
-1. 지도 중앙의 마커(핀) 위치를 찾으세요.
-2. 마커 근처의 장소명 텍스트를 정확하게 읽으세요.
-3. 그 장소명이 "${knownBefore}"로 시작하고 "${knownAfter}"로 끝나는지 확인하세요.
-4. "${knownBefore}"와 "${knownAfter}" 사이 글자가 정확히 ${blankCount}개인지 검증하세요.
-5. 그 ${blankCount}글자만 답하세요.
-
-## 출력
-PLACES: [지도에 보이는 장소명들]
-MATCH: [패턴과 일치하는 장소명 전체]
-ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
+반드시 아래 형식으로만 답하세요:
+PLACES: 장소1, 장소2, 장소3, ...
+MATCH: 전체장소명
+ANSWER: ${blankCount}글자정답`,
                 },
               ],
             },
@@ -2034,6 +2012,33 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
       }
     }
 
+    // PLACES에서 패턴 매칭 시도 (MATCH 실패 시 대비)
+    const placesMatch = raw.match(/PLACES:\s*(.+)/i);
+    if (placesMatch) {
+      const places = placesMatch[1]
+        .split(/[,\[\]]+/)
+        .map((s: string) => this.stripNoise(s))
+        .filter(Boolean);
+      for (const place of places) {
+        if (
+          place.startsWith(knownBefore) &&
+          (!knownAfter || place.endsWith(knownAfter))
+        ) {
+          const afterLen = knownAfter.length || 0;
+          const extracted =
+            afterLen > 0
+              ? place.slice(knownBefore.length, -afterLen)
+              : place.slice(knownBefore.length);
+          if (extracted.length === blankCount) {
+            this.logger.log(
+              `PLACES에서 정답 추출: "${place}" → "${extracted}"`,
+            );
+            return extracted;
+          }
+        }
+      }
+    }
+
     // 마지막 줄에서 추출
     const lines = raw.split('\n').filter((l: string) => l.trim());
     const lastLine = lines[lines.length - 1] || '';
@@ -2066,7 +2071,7 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model: 'claude-opus-4-20250514',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 200,
           messages: [
             {
