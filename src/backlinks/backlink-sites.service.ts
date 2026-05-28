@@ -69,9 +69,13 @@ export class BacklinkSitesService {
     });
   }
 
-  // ── Playwright 글 등록 ──
+  // ── 글 발행 (백그라운드) ──
 
-  async publishToSites(
+  /**
+   * PENDING 레코드를 먼저 생성 → 즉시 반환 → 백그라운드에서 실제 발행.
+   * 프론트엔드가 새로고침해도 발행이 중단되지 않는다.
+   */
+  async startPublish(
     userId: string,
     siteIds: string[],
     title: string,
@@ -85,7 +89,43 @@ export class BacklinkSitesService {
       throw new NotFoundException('선택된 사이트를 찾을 수 없습니다.');
     }
 
-    // 타입별 그룹핑: API 기반(WP)은 즉시 병렬, 티스토리는 동시 2개씩, 나머지 순차
+    // 1) 모든 사이트에 대해 PENDING 레코드를 미리 생성
+    const pendingPosts: BacklinkPost[] = [];
+    for (const site of sites) {
+      const post = this.postRepository.create({
+        authoritySiteId: site.id,
+        title,
+        body,
+        status: PostStatus.PENDING,
+        userId,
+      });
+      pendingPosts.push(await this.postRepository.save(post));
+    }
+
+    // 2) 백그라운드에서 실제 발행 시작 (fire-and-forget)
+    const postMap = new Map<string, BacklinkPost>();
+    for (const post of pendingPosts) {
+      postMap.set(post.authoritySiteId, post);
+    }
+
+    this.processPublishInBackground(sites, postMap, title, body).catch(
+      (err) => {
+        this.logger.error('백그라운드 발행 중 예외 발생', err);
+      },
+    );
+
+    // 3) PENDING 레코드를 즉시 반환 (HTTP 응답 즉시 완료)
+    return pendingPosts;
+  }
+
+  /** 백그라운드 발행 처리 (HTTP 연결과 무관하게 동작) */
+  private async processPublishInBackground(
+    sites: AuthoritySite[],
+    postMap: Map<string, BacklinkPost>,
+    title: string,
+    body: string,
+  ): Promise<void> {
+    // 타입별 그룹핑
     const wpSites = sites.filter(
       (s) => s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl,
     );
@@ -96,24 +136,24 @@ export class BacklinkSitesService {
         s.siteType !== SiteType.TISTORY,
     );
 
-    const allResults: BacklinkPost[] = [];
-
     // 1) WordPress – 전부 즉시 병렬 (API 호출, 딜레이 불필요)
     if (wpSites.length > 0) {
       this.logger.log(`WordPress ${wpSites.length}개 사이트 병렬 발행 시작`);
-      const wpPromises = wpSites.map((site) =>
-        this.publishAndSave(site, title, body, userId),
+      await Promise.all(
+        wpSites.map((site) =>
+          this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
+        ),
       );
-      allResults.push(...(await Promise.all(wpPromises)));
     }
 
     // 2) 기타 (LinkedIn 등) – 병렬 발행
     if (otherSites.length > 0) {
       this.logger.log(`기타 ${otherSites.length}개 사이트 병렬 발행 시작`);
-      const otherPromises = otherSites.map((site) =>
-        this.publishAndSave(site, title, body, userId),
+      await Promise.all(
+        otherSites.map((site) =>
+          this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
+        ),
       );
-      allResults.push(...(await Promise.all(otherPromises)));
     }
 
     // 3) 티스토리 – 동시 2개씩 (브라우저 리소스 제한 + CAPTCHA 방지)
@@ -131,31 +171,24 @@ export class BacklinkSitesService {
           await new Promise((resolve) => setTimeout(resolve, delay));
         }
         const batch = tistorySites.slice(i, i + TISTORY_CONCURRENCY);
-        const batchPromises = batch.map((site) =>
-          this.publishAndSave(site, title, body, userId),
+        await Promise.all(
+          batch.map((site) =>
+            this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
+          ),
         );
-        allResults.push(...(await Promise.all(batchPromises)));
       }
     }
 
-    return allResults;
+    this.logger.log('백그라운드 발행 완료');
   }
 
-  /** 단일 사이트 발행 + DB 저장 (병렬 호출용 헬퍼) */
-  private async publishAndSave(
+  /** 단일 사이트 발행 실행 + 기존 PENDING 레코드 업데이트 */
+  private async executeAndUpdatePost(
     site: AuthoritySite,
+    post: BacklinkPost,
     title: string,
     body: string,
-    userId: string,
   ): Promise<BacklinkPost> {
-    const post = this.postRepository.create({
-      authoritySiteId: site.id,
-      title,
-      body,
-      status: PostStatus.PENDING,
-      userId,
-    });
-
     try {
       const result = await this.publishToSingleSite(site, title, body);
       post.status = result.success ? PostStatus.SUCCESS : PostStatus.FAILED;

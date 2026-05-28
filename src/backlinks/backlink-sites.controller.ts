@@ -7,6 +7,7 @@ import {
   Body,
   Param,
   UseGuards,
+  HttpCode,
 } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth, ApiOperation } from "@nestjs/swagger";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
@@ -57,9 +58,10 @@ export class BacklinkSitesController {
   }
 
   @Post("publish")
-  @ApiOperation({ summary: "선택된 사이트에 글 등록" })
+  @HttpCode(202)
+  @ApiOperation({ summary: "선택된 사이트에 글 등록 (백그라운드)" })
   publish(@CurrentUser() user: AuthUser, @Body() dto: PublishToSitesDto) {
-    return this.service.publishToSites(
+    return this.service.startPublish(
       user.userId,
       dto.siteIds,
       dto.title,
