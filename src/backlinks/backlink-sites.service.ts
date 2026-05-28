@@ -707,8 +707,84 @@ export class BacklinkSitesService {
       }
 
       // 4. 제목 입력 - 티스토리 에디터 (SPA 렌더링 대기)
+      // SPA 클라이언트 리다이렉트 대기 (React 부팅 후 세션 체크 → 로그인 리다이렉트)
+      await page.waitForTimeout(3000);
       const preTitleUrl = page.url();
       this.logger.log(`제목 입력 시도 – URL: ${preTitleUrl}`);
+
+      // 2차 로그인 체크: SPA가 부팅 후 로그인 페이지로 리다이렉트한 경우
+      if (
+        preTitleUrl.includes('tistory.com/auth/login') ||
+        preTitleUrl.includes('accounts.kakao.com')
+      ) {
+        this.logger.log('SPA 리다이렉트 감지 – 카카오 재로그인 시도');
+        if (!site.loginUsername || !site.loginPassword) {
+          return {
+            success: false,
+            error: `세션 만료 후 재로그인 실패: 카카오 로그인 정보가 없습니다.`,
+          };
+        }
+
+        // 카카오 로그인 버튼 클릭
+        if (preTitleUrl.includes('tistory.com/auth/login')) {
+          const kakaoBtn = await page.$('.btn_login.link_kakao_id');
+          if (kakaoBtn) {
+            await kakaoBtn.click();
+            await page.waitForTimeout(3000);
+          }
+        }
+
+        // 카카오 로그인 폼
+        this.logger.log(`카카오 재로그인 폼 URL: ${page.url()}`);
+        const emailInput = await page.$(
+          'input[name="loginId"], input[name="loginKey"], #loginId--1',
+        );
+        if (emailInput) {
+          await emailInput.click();
+          await emailInput.fill(site.loginUsername);
+        }
+
+        const pwInput = await page.$('input[name="password"], #password--2');
+        if (pwInput) {
+          await pwInput.click();
+          await pwInput.fill(site.loginPassword);
+        }
+
+        const loginBtn = await page.$(
+          'button[type="submit"], .btn_g.btn_confirm.submit',
+        );
+        if (loginBtn) {
+          await loginBtn.click();
+          await page.waitForTimeout(5000);
+          this.logger.log(`재로그인 후 URL: ${page.url()}`);
+        }
+
+        // 재로그인 성공 확인
+        const reLoginUrl = page.url();
+        if (
+          reLoginUrl.includes('tistory.com/auth/login') ||
+          reLoginUrl.includes('accounts.kakao.com')
+        ) {
+          return {
+            success: false,
+            error: `카카오 재로그인에 실패했습니다. (URL: ${reLoginUrl})`,
+          };
+        }
+
+        // 쿠키 갱신
+        const freshCookies = await context.cookies();
+        await this.siteRepository.update(site.id, {
+          sessionCookies: JSON.stringify(freshCookies),
+        });
+        this.logger.log('재로그인 성공 – 쿠키 갱신 완료');
+
+        // 글쓰기 페이지로 이동
+        await page.goto(writeUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000,
+        });
+        await page.waitForTimeout(3000);
+      }
 
       // SPA가 완전히 렌더링될 때까지 대기 (최대 30초)
       const titleSelectors = [
