@@ -442,7 +442,11 @@ export class BacklinkSitesService {
 
     try {
       // 티스토리는 데이터센터 IP에서 dkaptcha CAPTCHA가 발생하므로 한국 프록시 사용
-      browser = await this.createBrowser({ useResidentialProxy: true });
+      // siteKey로 블로그별 고정 IP 할당 (세션 쿠키 유지를 위해)
+      browser = await this.createBrowser({
+        useResidentialProxy: true,
+        siteKey: site.id,
+      });
       context = await browser.newContext({
         viewport: { width: 1280, height: 900 },
         locale: 'ko-KR',
@@ -1156,8 +1160,8 @@ export class BacklinkSitesService {
 
   // ── 유틸리티 ──
 
-  /** PROXY_HOSTS에서 다음 프록시를 round-robin으로 선택 */
-  private pickNextProxy(): {
+  /** PROXY_HOSTS에서 사이트별 고정 IP 선택 (같은 siteKey → 같은 IP) */
+  private pickProxyForSite(siteKey?: string): {
     host: string;
     port: string;
     username: string;
@@ -1174,8 +1178,18 @@ export class BacklinkSitesService {
         .map((h) => h.trim())
         .filter(Boolean);
       if (hosts.length > 0) {
-        const host = hosts[this.proxyIndex % hosts.length];
-        this.proxyIndex++;
+        let index: number;
+        if (siteKey) {
+          // siteKey의 해시값으로 고정 인덱스 결정
+          let hash = 0;
+          for (let i = 0; i < siteKey.length; i++) {
+            hash = (hash * 31 + siteKey.charCodeAt(i)) >>> 0;
+          }
+          index = hash % hosts.length;
+        } else {
+          index = this.proxyIndex++;
+        }
+        const host = hosts[index];
         return {
           host,
           port: proxyPort,
@@ -1201,8 +1215,11 @@ export class BacklinkSitesService {
 
   private async createBrowser(options?: {
     useResidentialProxy?: boolean;
+    siteKey?: string;
   }): Promise<Browser> {
-    const proxy = options?.useResidentialProxy ? this.pickNextProxy() : null;
+    const proxy = options?.useResidentialProxy
+      ? this.pickProxyForSite(options.siteKey)
+      : null;
 
     this.logger.log(
       `CloakBrowser 스텔스 브라우저 실행${proxy ? ` (Proxy: ${proxy.host}:${proxy.port})` : ''}`,
