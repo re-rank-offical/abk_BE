@@ -944,9 +944,9 @@ export class BacklinkSitesService {
         this.logger.log(`발행 성공 (CAPTCHA 없음): ${page.url()}`);
       }
 
-      // CAPTCHA 감지 및 풀이 (최대 3회 시도)
+      // CAPTCHA 감지 및 풀이 (최대 5회 시도)
       if (!publishSuccess) {
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 5; attempt++) {
           const hasCaptcha = await page.evaluate(() => {
             const iframes = document.querySelectorAll('iframe');
             for (const f of iframes) {
@@ -1001,11 +1001,11 @@ export class BacklinkSitesService {
       }
 
       this.logger.error(
-        `발행 실패 [${site.siteName}]: CAPTCHA 자동 풀이 3회 모두 실패`,
+        `발행 실패 [${site.siteName}]: CAPTCHA 자동 풀이 5회 모두 실패`,
       );
       return {
         success: false,
-        error: 'dkaptcha CAPTCHA 자동 풀이에 실패했습니다 (3회 시도).',
+        error: 'dkaptcha CAPTCHA 자동 풀이에 실패했습니다 (5회 시도).',
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1088,11 +1088,20 @@ export class BacklinkSitesService {
    */
   private async solveDkaptcha(page: Page): Promise<boolean> {
     try {
-      // 1. dkaptcha iframe 찾기
+      // 1. dkaptcha iframe 찾기 (로드 대기 포함)
+      await page.waitForTimeout(1500);
       const dkFrame = await this.getDkaptchaFrame(page);
       if (!dkFrame) {
         this.logger.warn('dkaptcha iframe을 찾을 수 없음');
         return false;
+      }
+
+      // iframe 내 콘텐츠 로드 대기
+      try {
+        await dkFrame.waitForSelector('#container_dkaptcha', { timeout: 5000 });
+        await dkFrame.waitForSelector('.info_question', { timeout: 5000 });
+      } catch {
+        this.logger.warn('dkaptcha 컨테이너/질문 로드 대기 타임아웃');
       }
 
       // 2. 퀴즈 정보 추출 (지도 이미지 URL + 빈칸 패턴)
@@ -1112,13 +1121,19 @@ export class BacklinkSitesService {
           });
         }
 
-        return { imgSrc, parts };
+        // 전체 퀴즈 텍스트도 수집 (디버깅용)
+        const fullText = questionEl.textContent || '';
+
+        return { imgSrc, parts, fullText };
       });
 
       if (!quizInfo || !quizInfo.imgSrc) {
-        this.logger.warn('dkaptcha 퀴즈 정보 추출 실패');
+        this.logger.warn(
+          `dkaptcha 퀴즈 정보 추출 실패 (imgSrc=${quizInfo?.imgSrc || 'none'}, parts=${quizInfo?.parts?.length || 0})`,
+        );
         return false;
       }
+      this.logger.log(`퀴즈 전체 텍스트: "${quizInfo.fullText}"`);
 
       // 3. 빈칸 개수와 알려진 텍스트 파싱
       // 패턴 예: [빈칸][빈칸]코팰리체 → before / 오피스[빈칸][빈칸] → after
@@ -1145,19 +1160,29 @@ export class BacklinkSitesService {
         `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
       );
 
-      // 4. 지도 이미지를 base64로 가져오기
+      // 4. 지도 이미지를 base64로 가져오기 (실패 시 스크린샷 fallback)
       const imgUrl = quizInfo.imgSrc.startsWith('http')
         ? quizInfo.imgSrc
         : `https://${quizInfo.imgSrc}`;
-      const imgBase64 = await this.fetchImageAsBase64(imgUrl);
+      let imgBase64 = await this.fetchImageAsBase64(imgUrl);
+      let mediaType: 'image/jpeg' | 'image/png' = 'image/jpeg';
+
       if (!imgBase64) {
-        this.logger.warn('지도 이미지 다운로드 실패');
-        return false;
+        this.logger.warn('지도 이미지 다운로드 실패 – 스크린샷 fallback');
+        try {
+          const screenshotBuf = await page.screenshot({ type: 'png' });
+          imgBase64 = screenshotBuf.toString('base64');
+          mediaType = 'image/png';
+        } catch {
+          this.logger.warn('스크린샷도 실패');
+          return false;
+        }
       }
 
       // 5. Claude Vision API로 빈칸 글자를 직접 읽기
       const answer = await this.callClaudeVision(
         imgBase64,
+        mediaType,
         knownBefore,
         knownAfter,
         blankCount,
@@ -1276,6 +1301,7 @@ export class BacklinkSitesService {
    */
   private async callClaudeVision(
     imgBase64: string,
+    mediaType: 'image/jpeg' | 'image/png',
     knownBefore: string,
     knownAfter: string,
     blankCount: number,
@@ -1287,7 +1313,6 @@ export class BacklinkSitesService {
     }
 
     const pattern = `${knownBefore}${'□'.repeat(blankCount)}${knownAfter}`;
-    const knownHint = knownBefore || knownAfter;
 
     try {
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1298,8 +1323,8 @@ export class BacklinkSitesService {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 50,
+          model: 'claude-opus-4-20250514',
+          max_tokens: 300,
           messages: [
             {
               role: 'user',
@@ -1308,21 +1333,33 @@ export class BacklinkSitesService {
                   type: 'image',
                   source: {
                     type: 'base64',
-                    media_type: 'image/jpeg',
+                    media_type: mediaType,
                     data: imgBase64,
                   },
                 },
                 {
                   type: 'text',
-                  text: `카카오맵 지도 이미지 CAPTCHA 퀴즈입니다.
+                  text: `이 카카오맵 지도 이미지에서 장소명을 읽어 CAPTCHA 퀴즈를 풀어야 합니다.
 
-패턴: "${pattern}"
-□ 는 빈칸(각 1글자)입니다. "${knownHint}"가 포함된 장소명을 지도에서 찾아 빈칸에 들어갈 ${blankCount}글자만 답하세요.
+퀴즈 패턴: "${pattern}"
+(□ = 빈칸, 각 1글자. 총 ${blankCount}글자를 채워야 합니다)
 
-규칙:
-- 빈칸에 들어갈 글자만 답하세요 (${blankCount}글자)
-- 한글만, 공백 없이
-- 설명 없이 정답만`,
+${knownBefore ? `알려진 앞부분: "${knownBefore}"` : ''}${knownAfter ? `\n알려진 뒷부분: "${knownAfter}"` : ''}
+
+## 풀이 방법
+1. 지도 이미지에서 보이는 모든 장소명/건물명을 찾아 나열하세요.
+2. 나열한 장소명 중 "${knownBefore || knownAfter}"가 포함된 것을 찾으세요.
+3. 해당 장소명에서 빈칸(□)에 들어갈 ${blankCount}글자를 추출하세요.
+
+## 예시
+- 패턴 "한국□□학교", 지도에서 "한국대학교" 발견 → 답: 대학
+- 패턴 "□□프라자", 지도에서 "코스프라자" 발견 → 답: 코스
+- 패턴 "서울□□병원", 지도에서 "서울대학병원" 발견 → 답: 대학
+
+## 출력 형식
+PLACES: [보이는 장소명들 쉼표 구분]
+MATCH: [패턴과 일치하는 장소명]
+ANSWER: [빈칸에 들어갈 ${blankCount}글자만]`,
                 },
               ],
             },
@@ -1338,8 +1375,21 @@ export class BacklinkSitesService {
 
       const data = await resp.json();
       const raw = data?.content?.[0]?.text?.trim() || '';
-      // 한글만 추출하고 blankCount 글자로 제한
-      const hangul = raw.replace(/[^가-힣]/g, '');
+      this.logger.log(`Claude Vision 원본 응답: ${raw.substring(0, 300)}`);
+
+      // ANSWER: 라인에서 정답 추출
+      const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
+      if (answerMatch) {
+        const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
+        if (hangul.length >= blankCount) {
+          return hangul.substring(0, blankCount);
+        }
+      }
+
+      // fallback: 마지막 줄에서 한글 추출
+      const lines = raw.split('\n').filter((l) => l.trim());
+      const lastLine = lines[lines.length - 1] || '';
+      const hangul = lastLine.replace(/[^가-힣]/g, '');
       return hangul.substring(0, blankCount) || null;
     } catch (err) {
       this.logger.error(
