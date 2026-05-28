@@ -1280,31 +1280,91 @@ export class BacklinkSitesService {
         `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
       );
 
-      // 4. CAPTCHA 지도 이미지 획득 (순수 지도 이미지 우선 → iframe 스크린샷 fallback)
+      // 4. CAPTCHA 지도 이미지 획득
       let imgBase64: string | null = null;
       let mediaType: 'image/jpeg' | 'image/png' = 'image/png';
 
-      // 4-1. data-resource URL로 순수 지도 이미지 다운로드 (UI 없이 지도만, 가장 정확)
+      // 4-1. 브라우저 컨텍스트에서 data-resource 이미지 직접 fetch
+      //      (서버 IP 차단 우회: 브라우저의 세션/쿠키로 카카오 CDN 접근)
       if (quizInfo.imgSrc) {
         const imgUrl = quizInfo.imgSrc.startsWith('http')
           ? quizInfo.imgSrc
           : `https://${quizInfo.imgSrc}`;
-        this.logger.log(`지도 이미지 직접 다운로드: ${imgUrl}`);
+        this.logger.log(`브라우저 컨텍스트에서 지도 이미지 fetch: ${imgUrl}`);
+        try {
+          const b64 = await page.evaluate(async (url: string) => {
+            try {
+              const resp = await fetch(url);
+              if (!resp.ok) return null;
+              const blob = await resp.blob();
+              return new Promise<string | null>((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  const dataUrl = reader.result as string;
+                  resolve(dataUrl); // "data:image/...;base64,..."
+                };
+                reader.onerror = () => resolve(null);
+                reader.readAsDataURL(blob);
+              });
+            } catch {
+              return null;
+            }
+          }, imgUrl);
+
+          if (b64 && b64.startsWith('data:image')) {
+            const [header, data] = b64.split(',');
+            imgBase64 = data;
+            mediaType = header.includes('png') ? 'image/png' : 'image/jpeg';
+            this.logger.log(
+              `브라우저 fetch 성공 (${mediaType}, ${Math.round((data.length * 0.75) / 1024)}KB)`,
+            );
+          }
+        } catch (e) {
+          this.logger.warn(
+            `브라우저 fetch 실패: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+
+      // 4-2. 브라우저 fetch 실패 시 서버에서 직접 다운로드
+      if (!imgBase64 && quizInfo.imgSrc) {
+        const imgUrl = quizInfo.imgSrc.startsWith('http')
+          ? quizInfo.imgSrc
+          : `https://${quizInfo.imgSrc}`;
+        this.logger.log(`서버에서 지도 이미지 다운로드: ${imgUrl}`);
         const downloaded = await this.fetchImageAsBase64(imgUrl);
         if (downloaded) {
           imgBase64 = downloaded.base64;
           mediaType = downloaded.mediaType;
           this.logger.log(
-            `지도 이미지 다운로드 성공 (${downloaded.mediaType}, ${Math.round((downloaded.base64.length * 0.75) / 1024)}KB)`,
+            `서버 다운로드 성공 (${downloaded.mediaType}, ${Math.round((downloaded.base64.length * 0.75) / 1024)}KB)`,
           );
         }
       }
 
-      // 4-2. 다운로드 실패 시 iframe 스크린샷 (UI 포함되지만 차선책)
+      // 4-3. 다운로드 모두 실패 → iframe 내 지도 컨테이너 요소만 스크린샷
       if (!imgBase64) {
-        this.logger.warn(
-          '지도 이미지 다운로드 실패 – iframe 스크린샷 fallback',
-        );
+        this.logger.warn('이미지 다운로드 실패 – 지도 요소 스크린샷 시도');
+        try {
+          const mapEl = await dkFrame.$('#container_dkaptcha');
+          if (mapEl) {
+            const screenshotBuf = await mapEl.screenshot({ type: 'png' });
+            imgBase64 = screenshotBuf.toString('base64');
+            mediaType = 'image/png';
+            this.logger.log(
+              `지도 요소 스크린샷 성공 (${Math.round(screenshotBuf.length / 1024)}KB)`,
+            );
+          }
+        } catch (e) {
+          this.logger.warn(
+            `지도 요소 스크린샷 실패: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+
+      // 4-4. 최종 fallback: iframe 전체 스크린샷
+      if (!imgBase64) {
+        this.logger.warn('지도 요소 스크린샷 실패 – iframe 전체 스크린샷');
         try {
           const iframes = await page.$$('iframe');
           for (const iframe of iframes) {
@@ -1313,30 +1373,17 @@ export class BacklinkSitesService {
               const screenshotBuf = await iframe.screenshot({ type: 'png' });
               imgBase64 = screenshotBuf.toString('base64');
               mediaType = 'image/png';
-              this.logger.log(
-                `iframe 스크린샷 fallback 성공 (${Math.round(screenshotBuf.length / 1024)}KB)`,
-              );
               break;
             }
           }
-        } catch (e) {
-          this.logger.warn(
-            `iframe 스크린샷 실패: ${e instanceof Error ? e.message : String(e)}`,
-          );
+        } catch {
+          /* ignore */
         }
       }
 
-      // 4-3. 전체 페이지 스크린샷 최종 fallback
       if (!imgBase64) {
-        this.logger.warn('이미지 획득 실패 – 전체 페이지 스크린샷 fallback');
-        try {
-          const screenshotBuf = await page.screenshot({ type: 'png' });
-          imgBase64 = screenshotBuf.toString('base64');
-          mediaType = 'image/png';
-        } catch {
-          this.logger.warn('스크린샷도 실패');
-          return false;
-        }
+        this.logger.warn('모든 이미지 획득 방법 실패');
+        return false;
       }
 
       // 5. Claude Vision API로 빈칸 글자를 직접 읽기
@@ -1562,60 +1609,178 @@ ANSWER: [빈칸 ${blankCount}글자만, 반드시 ${blankCount}글자]`,
       const raw = data?.content?.[0]?.text?.trim() || '';
       this.logger.log(`Claude Vision 원본 응답: ${raw.substring(0, 300)}`);
 
-      // ANSWER: 라인에서 정답 추출
-      const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
-      let candidate: string | null = null;
+      // 1차 응답에서 정답 추출
+      const candidate = this.extractAnswer(
+        raw,
+        knownBefore,
+        knownAfter,
+        blankCount,
+      );
+      if (candidate) return candidate;
 
-      if (answerMatch) {
-        const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
-        if (hangul.length === blankCount) {
-          candidate = hangul;
-        } else {
-          this.logger.warn(
-            `ANSWER 글자수 불일치: "${hangul}" (${hangul.length}글자, 필요: ${blankCount})`,
-          );
-        }
+      // 글자수 불일치 시 – MATCH에서 찾은 장소명을 힌트로 2차 집중 질문
+      const matchLine = raw.match(/MATCH:\s*(.+)/i);
+      const firstMatchName = matchLine
+        ? matchLine[1].replace(/[^가-힣]/g, '')
+        : null;
+
+      if (firstMatchName) {
+        this.logger.log(
+          `1차 답 실패, "${firstMatchName}" 주변 재검사 (${blankCount}글자 필요)`,
+        );
+        const retryAnswer = await this.retryClaudeVision(
+          imgBase64,
+          mediaType,
+          knownBefore,
+          knownAfter,
+          blankCount,
+          firstMatchName,
+        );
+        if (retryAnswer) return retryAnswer;
       }
 
-      // fallback: MATCH 라인에서 패턴 매칭으로 추출
-      if (!candidate) {
-        const matchLine = raw.match(/MATCH:\s*(.+)/i);
-        if (matchLine) {
-          const matchedName = matchLine[1].replace(/[^가-힣]/g, '');
-          // knownBefore + answer + knownAfter = matchedName
-          if (
-            matchedName.startsWith(knownBefore) &&
-            matchedName.endsWith(knownAfter)
-          ) {
-            const afterLen = knownAfter.length || 0;
-            const extracted =
-              afterLen > 0
-                ? matchedName.slice(knownBefore.length, -afterLen)
-                : matchedName.slice(knownBefore.length);
-            if (extracted.length === blankCount) {
-              candidate = extracted;
-              this.logger.log(
-                `MATCH에서 정답 추출: "${matchedName}" → "${candidate}"`,
-              );
-            }
-          }
-        }
-      }
-
-      // fallback: 마지막 줄에서 한글 추출 (정확히 blankCount일 때만)
-      if (!candidate) {
-        const lines = raw.split('\n').filter((l: string) => l.trim());
-        const lastLine = lines[lines.length - 1] || '';
-        const hangul = lastLine.replace(/[^가-힣]/g, '');
-        if (hangul.length === blankCount) {
-          candidate = hangul;
-        }
-      }
-
-      return candidate;
+      return null;
     } catch (err) {
       this.logger.error(
         `Claude Vision 호출 실패: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /** 1차 응답에서 ANSWER/MATCH/마지막줄 순으로 정답 추출 */
+  private extractAnswer(
+    raw: string,
+    knownBefore: string,
+    knownAfter: string,
+    blankCount: number,
+  ): string | null {
+    // ANSWER: 라인
+    const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
+    if (answerMatch) {
+      const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
+      if (hangul.length === blankCount) return hangul;
+      this.logger.warn(
+        `ANSWER 글자수 불일치: "${hangul}" (${hangul.length}글자, 필요: ${blankCount})`,
+      );
+    }
+
+    // MATCH: 라인에서 패턴 매칭
+    const matchLine = raw.match(/MATCH:\s*(.+)/i);
+    if (matchLine) {
+      const matchedName = matchLine[1].replace(/[^가-힣]/g, '');
+      if (
+        matchedName.startsWith(knownBefore) &&
+        matchedName.endsWith(knownAfter)
+      ) {
+        const afterLen = knownAfter.length || 0;
+        const extracted =
+          afterLen > 0
+            ? matchedName.slice(knownBefore.length, -afterLen)
+            : matchedName.slice(knownBefore.length);
+        if (extracted.length === blankCount) {
+          this.logger.log(
+            `MATCH에서 정답 추출: "${matchedName}" → "${extracted}"`,
+          );
+          return extracted;
+        }
+      }
+    }
+
+    // 마지막 줄에서 한글 추출
+    const lines = raw.split('\n').filter((l: string) => l.trim());
+    const lastLine = lines[lines.length - 1] || '';
+    const hangul = lastLine.replace(/[^가-힣]/g, '');
+    if (hangul.length === blankCount) return hangul;
+
+    return null;
+  }
+
+  /** 2차 집중 질문: 1차에서 찾은 장소명 주변을 더 정밀하게 다시 읽기 */
+  private async retryClaudeVision(
+    imgBase64: string,
+    mediaType: 'image/jpeg' | 'image/png',
+    knownBefore: string,
+    knownAfter: string,
+    blankCount: number,
+    firstMatchName: string,
+  ): Promise<string | null> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return null;
+
+    const pattern = `${knownBefore}${'□'.repeat(blankCount)}${knownAfter}`;
+
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-opus-4-20250514',
+          max_tokens: 200,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: mediaType,
+                    data: imgBase64,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: `이전에 이 지도에서 "${firstMatchName}"을 찾았지만, 정답은 정확히 ${blankCount}글자여야 합니다.
+
+패턴: "${pattern}" (□ = 빈칸 1글자, 총 ${blankCount}글자)
+
+"${firstMatchName}" 주변을 다시 매우 주의 깊게 보세요.
+- 글자가 겹쳐 보이거나 작아서 놓친 글자가 있을 수 있습니다.
+- "${knownAfter}" 바로 앞에 있는 글자들을 한 글자씩 천천히 읽으세요.
+- 정답은 반드시 ${blankCount}개의 한글 글자입니다.
+
+ANSWER: [정확히 ${blankCount}글자만]`,
+                },
+              ],
+            },
+          ],
+        }),
+      });
+
+      if (!resp.ok) return null;
+
+      const data = await resp.json();
+      const raw = data?.content?.[0]?.text?.trim() || '';
+      this.logger.log(`2차 재검사 응답: ${raw.substring(0, 200)}`);
+
+      // ANSWER 추출
+      const answerMatch = raw.match(/ANSWER:\s*(.+)/i);
+      if (answerMatch) {
+        const hangul = answerMatch[1].replace(/[^가-힣]/g, '');
+        if (hangul.length === blankCount) {
+          this.logger.log(`2차 재검사 성공: "${hangul}"`);
+          return hangul;
+        }
+      }
+
+      // 전체에서 정확히 blankCount 한글 추출
+      const allHangul = raw.replace(/[^가-힣]/g, '');
+      // 마지막 blankCount 글자 시도
+      if (allHangul.length >= blankCount) {
+        const tail = allHangul.slice(-blankCount);
+        this.logger.log(`2차 재검사 tail 추출: "${tail}"`);
+        return tail;
+      }
+
+      return null;
+    } catch (err) {
+      this.logger.error(
+        `2차 재검사 실패: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }
