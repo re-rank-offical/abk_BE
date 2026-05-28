@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, Not, IsNull } from 'typeorm';
 import { Browser, BrowserContext, Page, Frame } from 'playwright-core';
 
 import {
@@ -68,6 +69,113 @@ export class BacklinkSitesService {
       relations: ['authoritySite'],
       order: { createdAt: 'DESC' },
     });
+  }
+
+  // ── 쿠키 Keep-Alive (12시간마다) ──
+
+  /**
+   * 모든 티스토리 사이트의 세션 쿠키를 주기적으로 갱신한다.
+   * 저장된 쿠키로 블로그에 접속 → 세션 연장 → 갱신된 쿠키 저장.
+   * 세션 만료된 사이트는 경고 로그만 남기고 스킵한다.
+   */
+  @Cron('0 */12 * * *') // 매 12시간 (00:00, 12:00)
+  async refreshTistoryCookies(): Promise<void> {
+    const sites = await this.siteRepository.find({
+      where: {
+        siteType: SiteType.TISTORY,
+        sessionCookies: Not(IsNull()),
+      },
+    });
+
+    if (sites.length === 0) return;
+
+    this.logger.log(
+      `[쿠키 Keep-Alive] 티스토리 ${sites.length}개 사이트 쿠키 갱신 시작`,
+    );
+
+    for (const site of sites) {
+      let browser: Browser | null = null;
+      let context: BrowserContext | null = null;
+
+      try {
+        const blogName =
+          (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) ||
+            [])[1] || '';
+        if (!blogName) {
+          this.logger.warn(
+            `[쿠키 Keep-Alive] ${site.siteName}: 블로그명 파싱 실패 (${site.siteUrl})`,
+          );
+          continue;
+        }
+
+        browser = await this.createBrowser({
+          useResidentialProxy: true,
+          siteKey: site.id,
+        });
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          locale: 'ko-KR',
+          timezoneId: 'Asia/Seoul',
+          ignoreHTTPSErrors: true,
+        });
+
+        // 저장된 쿠키 복원
+        const cookies = JSON.parse(site.sessionCookies!);
+        await context.addCookies(cookies);
+
+        const page = await context.newPage();
+
+        // 블로그 관리 페이지 방문 (세션 갱신)
+        await page.goto(`https://${blogName}.tistory.com/manage/`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 20000,
+        });
+        await page.waitForTimeout(3000);
+
+        const currentUrl = page.url();
+
+        // 로그인 페이지로 리다이렉트되면 세션 만료
+        if (
+          currentUrl.includes('tistory.com/auth/login') ||
+          currentUrl.includes('accounts.kakao.com')
+        ) {
+          this.logger.warn(
+            `[쿠키 Keep-Alive] ${site.siteName}: 세션 만료됨 – 수동 쿠키 갱신 필요`,
+          );
+          continue;
+        }
+
+        // 갱신된 쿠키 저장
+        const freshCookies = await context.cookies();
+        await this.siteRepository.update(site.id, {
+          sessionCookies: JSON.stringify(freshCookies),
+        });
+
+        this.logger.log(
+          `[쿠키 Keep-Alive] ${site.siteName}: 쿠키 갱신 완료 (${freshCookies.length}개)`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `[쿠키 Keep-Alive] ${site.siteName}: 에러 – ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // 사이트 간 딜레이 (프록시 rate limit 방지)
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+
+    this.logger.log(`[쿠키 Keep-Alive] 전체 갱신 완료`);
   }
 
   // ── 글 발행 (백그라운드) ──

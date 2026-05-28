@@ -5,13 +5,27 @@
  * 예시:   npx ts-node scripts/update-cookies.ts re-rank
  *
  * 1. 브라우저가 열리면 카카오 로그인을 직접 완료하세요 (2FA 포함)
- * 2. 글쓰기 페이지가 보이면 자동으로 쿠키가 저장됩니다.
+ * 2. 로그인 완료 후 터미널에서 Enter를 누르면 쿠키가 저장됩니다.
  */
 import { chromium } from 'playwright-core';
 import { Client } from 'pg';
 import * as dotenv from 'dotenv';
+import * as readline from 'readline';
 
 dotenv.config();
+
+function waitForEnter(prompt: string): Promise<void> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(prompt, () => {
+      rl.close();
+      resolve();
+    });
+  });
+}
 
 async function main() {
   const blogName = process.argv[2];
@@ -29,9 +43,6 @@ async function main() {
     process.exit(1);
   }
 
-  const tistoryUrl = `https://${blogName}.tistory.com`;
-  const writeUrl = `${tistoryUrl}/manage/newpost`;
-
   console.log(`\n[1/4] 브라우저 실행 중...`);
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({
@@ -40,42 +51,42 @@ async function main() {
   });
   const page = await context.newPage();
 
-  console.log(`[2/4] ${tistoryUrl} 로 이동합니다.`);
-  console.log(`       → 카카오 로그인을 직접 완료하세요 (2FA 포함)\n`);
+  console.log(`[2/4] 티스토리 로그인 페이지로 이동합니다.`);
+  console.log(`       → 카카오 로그인을 직접 완료하세요 (2FA 포함)`);
+  console.log(
+    `       → 로그인 후 ${blogName}.tistory.com 아무 페이지에 있으면 됩니다.\n`,
+  );
 
   await page.goto(`https://www.tistory.com/auth/login`, {
     waitUntil: 'domcontentloaded',
   });
 
-  // 글쓰기 페이지에 도달할 때까지 대기 (최대 5분)
-  console.log(`       로그인 완료 후 글쓰기 페이지 도달을 기다리는 중...`);
-  console.log(`       (최대 5분 대기)\n`);
-
-  try {
-    await page.waitForURL(/manage\/(newpost|edit)/, { timeout: 300000 });
-  } catch {
-    // URL 패턴이 안 맞으면 수동으로 글쓰기 페이지로 이동
-    console.log(`       글쓰기 페이지로 직접 이동합니다...`);
-    await page.goto(writeUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    await page.waitForTimeout(5000);
-  }
+  await waitForEnter(
+    '       로그인을 완료했으면 Enter를 누르세요... ',
+  );
 
   const currentUrl = page.url();
-  if (
-    currentUrl.includes('auth/login') ||
-    currentUrl.includes('accounts.kakao.com')
-  ) {
-    console.error('\n❌ 로그인이 완료되지 않았습니다. 다시 시도하세요.');
+  console.log(`\n[3/4] 현재 URL: ${currentUrl}`);
+
+  if (currentUrl.includes('accounts.kakao.com')) {
+    console.error('❌ 아직 카카오 로그인 페이지입니다. 다시 시도하세요.');
     await browser.close();
     process.exit(1);
   }
 
-  console.log(`[3/4] 로그인 성공! URL: ${currentUrl}`);
-  console.log(`       쿠키를 추출하는 중...`);
+  // 로그인 후 블로그 관리 페이지로 이동하여 tistory 쿠키 확보
+  console.log(`       ${blogName}.tistory.com 으로 이동하여 쿠키 확보 중...`);
+  try {
+    await page.goto(`https://${blogName}.tistory.com/manage/`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 15000,
+    });
+    await page.waitForTimeout(3000);
+  } catch {
+    // 이동 실패해도 쿠키는 추출 가능
+  }
 
+  console.log(`       쿠키를 추출하는 중...`);
   const cookies = await context.cookies();
   const cookieJson = JSON.stringify(cookies);
   console.log(
