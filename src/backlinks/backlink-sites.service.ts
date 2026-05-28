@@ -657,20 +657,52 @@ export class BacklinkSitesService {
           this.logger.warn('로그인 버튼을 찾지 못함');
         }
 
+        // 로그인 성공 여부 확인
+        const postLoginUrl = page.url();
+        this.logger.log(`로그인 시도 후 URL: ${postLoginUrl}`);
+
+        if (
+          postLoginUrl.includes('accounts.kakao.com') ||
+          postLoginUrl.includes('tistory.com/auth/login')
+        ) {
+          this.logger.error(
+            `카카오 로그인 실패 – 여전히 로그인 페이지: ${postLoginUrl}`,
+          );
+          return {
+            success: false,
+            error: `카카오 로그인에 실패했습니다. 계정 정보를 확인하세요. (URL: ${postLoginUrl})`,
+          };
+        }
+
         // 로그인 후 쿠키 저장
         const cookies = await context.cookies();
         await this.siteRepository.update(site.id, {
           sessionCookies: JSON.stringify(cookies),
         });
+        this.logger.log('로그인 성공 – 쿠키 저장 완료');
 
         // 글쓰기 페이지로 다시 이동
-        const afterLoginUrl = page.url();
-        if (!afterLoginUrl.includes('/manage/newpost')) {
+        if (!postLoginUrl.includes('/manage/newpost')) {
           await page.goto(writeUrl, {
             waitUntil: 'domcontentloaded',
             timeout: 30000,
           });
           await page.waitForTimeout(3000);
+        }
+
+        // 글쓰기 페이지 도달 확인
+        const finalUrl = page.url();
+        if (
+          finalUrl.includes('tistory.com/auth/login') ||
+          finalUrl.includes('accounts.kakao.com')
+        ) {
+          this.logger.error(
+            `로그인 후에도 글쓰기 페이지 접근 실패: ${finalUrl}`,
+          );
+          return {
+            success: false,
+            error: `로그인은 되었지만 글쓰기 페이지에 접근할 수 없습니다. (URL: ${finalUrl})`,
+          };
         }
       }
 
