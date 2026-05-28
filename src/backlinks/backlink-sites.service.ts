@@ -19,6 +19,7 @@ import { UpdateAuthoritySiteDto } from './dto/update-authority-site.dto';
 export class BacklinkSitesService {
   private readonly logger = new Logger(BacklinkSitesService.name);
   private proxyIndex = 0;
+  private publishMutex = Promise.resolve(); // 글 단위 발행 직렬화
 
   constructor(
     @InjectRepository(AuthoritySite)
@@ -211,17 +212,19 @@ export class BacklinkSitesService {
       pendingPosts.push(await this.postRepository.save(post));
     }
 
-    // 2) 백그라운드에서 실제 발행 시작 (fire-and-forget)
+    // 2) 백그라운드에서 실제 발행 시작 (뮤텍스로 글 단위 직렬화)
     const postMap = new Map<string, BacklinkPost>();
     for (const post of pendingPosts) {
       postMap.set(post.authoritySiteId, post);
     }
 
-    this.processPublishInBackground(sites, postMap, title, body).catch(
-      (err) => {
-        this.logger.error('백그라운드 발행 중 예외 발생', err);
-      },
-    );
+    // 이전 발행이 끝날 때까지 대기 후 실행 (글 단위 직렬화)
+    this.publishMutex = this.publishMutex.then(
+      () => this.processPublishInBackground(sites, postMap, title, body),
+      () => this.processPublishInBackground(sites, postMap, title, body),
+    ).catch((err) => {
+      this.logger.error('백그라운드 발행 중 예외 발생', err);
+    });
 
     // 3) PENDING 레코드를 즉시 반환 (HTTP 응답 즉시 완료)
     return pendingPosts;
@@ -234,38 +237,75 @@ export class BacklinkSitesService {
     title: string,
     body: string,
   ): Promise<void> {
-    // 타입별 그룹핑
-    const wpSites = sites.filter(
+    // 타입별 4그룹 분류
+    const wpApiSites = sites.filter(
       (s) => s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl,
+    );
+    const wpPlaywrightSites = sites.filter(
+      (s) => s.siteType === SiteType.WORDPRESS && !s.wordpressApiUrl,
     );
     const tistorySites = sites.filter((s) => s.siteType === SiteType.TISTORY);
     const otherSites = sites.filter(
-      (s) =>
-        !(s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl) &&
-        s.siteType !== SiteType.TISTORY,
+      (s) => s.siteType !== SiteType.WORDPRESS && s.siteType !== SiteType.TISTORY,
     );
 
-    // 1) WordPress – 전부 즉시 병렬 (API 호출, 딜레이 불필요)
-    if (wpSites.length > 0) {
-      this.logger.log(`WordPress ${wpSites.length}개 사이트 병렬 발행 시작`);
+    // 1) WordPress REST API – 전부 즉시 병렬 (브라우저 불필요)
+    if (wpApiSites.length > 0) {
+      this.logger.log(`WordPress API ${wpApiSites.length}개 사이트 병렬 발행 시작`);
       await Promise.all(
-        wpSites.map((site) =>
+        wpApiSites.map((site) =>
           this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
         ),
       );
     }
 
-    // 2) 기타 (LinkedIn 등) – 병렬 발행
+    // 2) WordPress Playwright – 2개씩 배치 (브라우저 리소스 제한)
+    if (wpPlaywrightSites.length > 0) {
+      this.logger.log(
+        `WordPress Playwright ${wpPlaywrightSites.length}개 사이트 발행 시작 (동시 2개)`,
+      );
+      const WP_CONCURRENCY = 2;
+      for (let i = 0; i < wpPlaywrightSites.length; i += WP_CONCURRENCY) {
+        if (i > 0) {
+          const delay = 5000 + Math.random() * 5000;
+          this.logger.log(
+            `다음 WordPress 배치까지 ${Math.round(delay / 1000)}초 대기`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        const batch = wpPlaywrightSites.slice(i, i + WP_CONCURRENCY);
+        await Promise.all(
+          batch.map((site) =>
+            this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
+          ),
+        );
+      }
+    }
+
+    // 3) 기타 (LinkedIn, 보리스 등) – 2개씩 배치 (브라우저 리소스 제한)
     if (otherSites.length > 0) {
-      this.logger.log(`기타 ${otherSites.length}개 사이트 병렬 발행 시작`);
-      await Promise.all(
-        otherSites.map((site) =>
-          this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
-        ),
+      this.logger.log(
+        `기타 ${otherSites.length}개 사이트 발행 시작 (동시 2개)`,
       );
+      const OTHER_CONCURRENCY = 2;
+      for (let i = 0; i < otherSites.length; i += OTHER_CONCURRENCY) {
+        if (i > 0) {
+          const delay = 5000 + Math.random() * 5000;
+          this.logger.log(
+            `다음 기타 배치까지 ${Math.round(delay / 1000)}초 대기`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        const batch = otherSites.slice(i, i + OTHER_CONCURRENCY);
+        await Promise.all(
+          batch.map((site) =>
+            this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
+          ),
+        );
+      }
     }
 
-    // 3) 티스토리 – 동시 2개씩 (브라우저 리소스 제한 + CAPTCHA 방지)
+    // 4) 티스토리 – 2개씩 배치 (브라우저 리소스 제한 + CAPTCHA 방지)
     if (tistorySites.length > 0) {
       this.logger.log(
         `티스토리 ${tistorySites.length}개 사이트 발행 시작 (동시 2개)`,
