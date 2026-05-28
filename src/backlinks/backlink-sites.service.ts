@@ -85,40 +85,94 @@ export class BacklinkSitesService {
       throw new NotFoundException('선택된 사이트를 찾을 수 없습니다.');
     }
 
-    const results: BacklinkPost[] = [];
+    // 타입별 그룹핑: API 기반(WP)은 즉시 병렬, 티스토리는 동시 2개씩, 나머지 순차
+    const wpSites = sites.filter(
+      (s) => s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl,
+    );
+    const tistorySites = sites.filter(
+      (s) => s.siteType === SiteType.TISTORY,
+    );
+    const otherSites = sites.filter(
+      (s) =>
+        !(s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl) &&
+        s.siteType !== SiteType.TISTORY,
+    );
 
-    for (const site of sites) {
-      // 사이트 간 랜덤 딜레이 (CAPTCHA 방지 – 30~60초)
-      if (results.length > 0) {
-        const delay = 30000 + Math.random() * 30000;
-        this.logger.log(
-          `다음 사이트 발행까지 ${Math.round(delay / 1000)}초 대기 (CAPTCHA 방지)`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
+    const allResults: BacklinkPost[] = [];
 
-      const post = this.postRepository.create({
-        authoritySiteId: site.id,
-        title,
-        body,
-        status: PostStatus.PENDING,
-        userId,
-      });
-
-      try {
-        const result = await this.publishToSingleSite(site, title, body);
-        post.status = result.success ? PostStatus.SUCCESS : PostStatus.FAILED;
-        post.publishedUrl = result.publishedUrl ?? undefined;
-        post.errorMessage = result.error ?? undefined;
-      } catch (err) {
-        post.status = PostStatus.FAILED;
-        post.errorMessage = err instanceof Error ? err.message : String(err);
-      }
-
-      results.push(await this.postRepository.save(post));
+    // 1) WordPress – 전부 즉시 병렬 (API 호출, 딜레이 불필요)
+    if (wpSites.length > 0) {
+      this.logger.log(
+        `WordPress ${wpSites.length}개 사이트 병렬 발행 시작`,
+      );
+      const wpPromises = wpSites.map((site) =>
+        this.publishAndSave(site, title, body, userId),
+      );
+      allResults.push(...(await Promise.all(wpPromises)));
     }
 
-    return results;
+    // 2) 기타 (LinkedIn 등) – 병렬 발행
+    if (otherSites.length > 0) {
+      this.logger.log(
+        `기타 ${otherSites.length}개 사이트 병렬 발행 시작`,
+      );
+      const otherPromises = otherSites.map((site) =>
+        this.publishAndSave(site, title, body, userId),
+      );
+      allResults.push(...(await Promise.all(otherPromises)));
+    }
+
+    // 3) 티스토리 – 동시 2개씩 (브라우저 리소스 제한 + CAPTCHA 방지)
+    if (tistorySites.length > 0) {
+      this.logger.log(
+        `티스토리 ${tistorySites.length}개 사이트 발행 시작 (동시 2개)`,
+      );
+      const TISTORY_CONCURRENCY = 2;
+      for (let i = 0; i < tistorySites.length; i += TISTORY_CONCURRENCY) {
+        if (i > 0) {
+          const delay = 10000 + Math.random() * 10000;
+          this.logger.log(
+            `다음 티스토리 배치까지 ${Math.round(delay / 1000)}초 대기`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        const batch = tistorySites.slice(i, i + TISTORY_CONCURRENCY);
+        const batchPromises = batch.map((site) =>
+          this.publishAndSave(site, title, body, userId),
+        );
+        allResults.push(...(await Promise.all(batchPromises)));
+      }
+    }
+
+    return allResults;
+  }
+
+  /** 단일 사이트 발행 + DB 저장 (병렬 호출용 헬퍼) */
+  private async publishAndSave(
+    site: AuthoritySite,
+    title: string,
+    body: string,
+    userId: string,
+  ): Promise<BacklinkPost> {
+    const post = this.postRepository.create({
+      authoritySiteId: site.id,
+      title,
+      body,
+      status: PostStatus.PENDING,
+      userId,
+    });
+
+    try {
+      const result = await this.publishToSingleSite(site, title, body);
+      post.status = result.success ? PostStatus.SUCCESS : PostStatus.FAILED;
+      post.publishedUrl = result.publishedUrl ?? undefined;
+      post.errorMessage = result.error ?? undefined;
+    } catch (err) {
+      post.status = PostStatus.FAILED;
+      post.errorMessage = err instanceof Error ? err.message : String(err);
+    }
+
+    return this.postRepository.save(post);
   }
 
   private async publishToSingleSite(
@@ -403,54 +457,68 @@ export class BacklinkSitesService {
         await dialog.accept();
       });
 
-      // 2. 세션 워밍업: sessionLength를 높여 dkaptcha 봇 탐지 완화
+      // 2. 세션 워밍업 (쿠키가 있으면 축소, 없으면 전체)
       const blogName =
         (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] || '';
-      this.logger.log(`세션 워밍업 시작 (blog: ${blogName})...`);
+      const hasSession = !!site.sessionCookies;
 
-      // 2-1) 티스토리 홈 방문
-      try {
-        await page.goto('https://www.tistory.com/', {
-          waitUntil: 'domcontentloaded',
-          timeout: 15000,
-        });
-        await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
-        await page.evaluate(() =>
-          window.scrollBy(0, 200 + Math.random() * 300),
-        );
-        await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
-      } catch {
-        /* ignore */
-      }
-
-      // 2-2) 블로그 홈 방문
-      if (blogName) {
+      if (hasSession) {
+        // 쿠키가 있으면 블로그 홈만 간단히 방문 (워밍업 축소)
+        this.logger.log(`세션 쿠키 있음 – 간소화 워밍업 (blog: ${blogName})`);
+        if (blogName) {
+          try {
+            await page.goto(`https://${blogName}.tistory.com/`, {
+              waitUntil: 'domcontentloaded',
+              timeout: 15000,
+            });
+            await page.waitForTimeout(1000 + Math.floor(Math.random() * 1000));
+          } catch {
+            /* ignore */
+          }
+        }
+      } else {
+        // 쿠키 없으면 전체 워밍업
+        this.logger.log(`세션 쿠키 없음 – 전체 워밍업 시작 (blog: ${blogName})`);
         try {
-          await page.goto(`https://${blogName}.tistory.com/`, {
+          await page.goto('https://www.tistory.com/', {
             waitUntil: 'domcontentloaded',
             timeout: 15000,
           });
           await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
           await page.evaluate(() =>
-            window.scrollBy(0, 300 + Math.random() * 400),
+            window.scrollBy(0, 200 + Math.random() * 300),
           );
           await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
         } catch {
           /* ignore */
         }
 
-        // 2-3) 관리 대시보드 방문
-        try {
-          await page.goto(`https://${blogName}.tistory.com/manage/`, {
-            waitUntil: 'domcontentloaded',
-            timeout: 15000,
-          });
-          await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
-        } catch {
-          /* ignore */
+        if (blogName) {
+          try {
+            await page.goto(`https://${blogName}.tistory.com/`, {
+              waitUntil: 'domcontentloaded',
+              timeout: 15000,
+            });
+            await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
+            await page.evaluate(() =>
+              window.scrollBy(0, 300 + Math.random() * 400),
+            );
+            await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
+          } catch {
+            /* ignore */
+          }
+
+          try {
+            await page.goto(`https://${blogName}.tistory.com/manage/`, {
+              waitUntil: 'domcontentloaded',
+              timeout: 15000,
+            });
+            await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
+          } catch {
+            /* ignore */
+          }
         }
       }
-
       this.logger.log('세션 워밍업 완료');
 
       // 3. 글쓰기 페이지 이동 (리다이렉트 가능하므로 에러 허용)
