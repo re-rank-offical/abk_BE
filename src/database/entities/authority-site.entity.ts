@@ -10,8 +10,9 @@ import { BacklinkPost } from "./backlink-post.entity";
 
 export enum SiteType {
   WORDPRESS = "WORDPRESS",
-  CUSTOM = "CUSTOM", // 범용 CSS 셀렉터 기반
+  CUSTOM = "CUSTOM", // 레거시 (기존 데이터 호환)
   TISTORY = "TISTORY", // 티스토리 (카카오 로그인)
+  LINKEDIN = "LINKEDIN", // LinkedIn 아티클
 }
 
 @Entity("authority_sites")
