@@ -477,10 +477,14 @@ export class BacklinkSitesService {
       });
 
       // 다이얼로그(confirm/alert) 자동 수락 – 임시저장 복구 팝업 등 차단 방지
+      let dailyLimitHit = false;
       page.on('dialog', async (dialog) => {
-        this.logger.log(
-          `다이얼로그 감지: ${dialog.type()} - ${dialog.message()}`,
-        );
+        const msg = dialog.message();
+        this.logger.log(`다이얼로그 감지: ${dialog.type()} - ${msg}`);
+        if (msg.includes('최대') && msg.includes('개까지')) {
+          dailyLimitHit = true;
+          this.logger.warn('일일 발행 제한 감지 – CAPTCHA 재시도 중단');
+        }
         await dialog.accept();
       });
 
@@ -1048,6 +1052,11 @@ export class BacklinkSitesService {
       // CAPTCHA 감지 및 풀이 (최대 10회 시도)
       if (!publishSuccess) {
         for (let attempt = 0; attempt < 10; attempt++) {
+          if (dailyLimitHit) {
+            this.logger.warn('일일 발행 제한으로 CAPTCHA 시도 중단');
+            break;
+          }
+
           const hasCaptcha = await page.evaluate(() => {
             const iframes = document.querySelectorAll('iframe');
             for (const f of iframes) {
@@ -1063,17 +1072,23 @@ export class BacklinkSitesService {
           );
           const solved = await this.solveDkaptcha(page);
 
+          if (dailyLimitHit) {
+            this.logger.warn('CAPTCHA 풀이 중 일일 발행 제한 감지');
+            break;
+          }
+
           if (solved) {
             // 풀이 후 발행 완료 대기 (최대 10초)
             for (let w = 0; w < 10; w++) {
               await page.waitForTimeout(1000);
+              if (dailyLimitHit) break;
               if (!page.url().includes('/manage/newpost')) {
                 publishSuccess = true;
                 this.logger.log(`CAPTCHA 풀이 후 발행 성공: ${page.url()}`);
                 break;
               }
             }
-            if (publishSuccess) break;
+            if (publishSuccess || dailyLimitHit) break;
           } else {
             this.logger.warn(
               `CAPTCHA 풀이 실패 (시도 ${attempt + 1}) – 새로풀기 시도`,
@@ -1099,6 +1114,16 @@ export class BacklinkSitesService {
           `티스토리 발행 성공 [${site.siteName}] publishedUrl=${publishedUrl}`,
         );
         return { success: true, publishedUrl };
+      }
+
+      if (dailyLimitHit) {
+        this.logger.error(
+          `발행 실패 [${site.siteName}]: 하루 공개 발행 제한(15개) 초과`,
+        );
+        return {
+          success: false,
+          error: '하루 공개 발행 제한(15개)을 초과했습니다.',
+        };
       }
 
       this.logger.error(
@@ -1274,8 +1299,8 @@ export class BacklinkSitesService {
           }
         }
       }
-      const knownBefore = textBefore.join('');
-      const knownAfter = textAfter.join('');
+      const knownBefore = textBefore.join('').trim();
+      const knownAfter = textAfter.join('').trim();
       this.logger.log(
         `퀴즈: 빈칸 ${blankCount}개, 패턴="${knownBefore}[${'□'.repeat(blankCount)}]${knownAfter}"`,
       );
@@ -1782,13 +1807,26 @@ ANSWER: [정확히 ${blankCount}글자만]`,
         }
       }
 
-      // 전체에서 정확히 blankCount 글자 추출
-      const allCleaned = this.stripNoise(raw);
-      // 마지막 blankCount 글자 시도
-      if (allCleaned.length >= blankCount) {
-        const tail = allCleaned.slice(-blankCount);
-        this.logger.log(`2차 재검사 tail 추출: "${tail}"`);
-        return tail;
+      // MATCH에서 패턴 매칭 시도
+      const matchLine = raw.match(/MATCH:\s*(.+)/i);
+      if (matchLine) {
+        const matchedName = this.stripNoise(matchLine[1]);
+        if (
+          matchedName.startsWith(knownBefore) &&
+          (knownAfter === '' || matchedName.endsWith(knownAfter))
+        ) {
+          const afterLen = knownAfter.length || 0;
+          const extracted =
+            afterLen > 0
+              ? matchedName.slice(knownBefore.length, -afterLen)
+              : matchedName.slice(knownBefore.length);
+          if (extracted.length === blankCount) {
+            this.logger.log(
+              `2차 MATCH 추출 성공: "${matchedName}" → "${extracted}"`,
+            );
+            return extracted;
+          }
+        }
       }
 
       return null;
