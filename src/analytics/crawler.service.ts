@@ -440,21 +440,23 @@ export class CrawlerService {
   async crawlWordPressStats(
     connection: MediaConnection,
   ): Promise<BlogStats | null> {
-    if (!connection.accountUrl) {
+    const apiRoot = this.getWordPressApiRoot(connection);
+
+    if (!apiRoot) {
       this.logger.warn('WordPress 통계 수집: 블로그 URL이 없습니다.');
       return null;
     }
 
     try {
-      this.logger.log(`WordPress 통계 수집 시작: ${connection.accountUrl}`);
+      this.logger.log(`WordPress 통계 수집 시작: ${apiRoot}`);
 
-      const baseUrl = connection.accountUrl.replace(/\/$/, '');
+      const baseUrl = apiRoot.replace(/\/wp-json$/, '');
 
       // WordPress REST API 엔드포인트
       const postsApiUrl = `${baseUrl}/wp-json/wp/v2/posts?per_page=100`;
 
       // 게시물 목록 가져오기
-      const response = await fetch(postsApiUrl);
+      const response = await this.fetchWithTimeout(postsApiUrl);
 
       if (!response.ok) {
         this.logger.warn(
@@ -483,7 +485,7 @@ export class CrawlerService {
       if (connection.username && connection.password) {
         try {
           const statsUrl = `${baseUrl}/wp-json/jetpack/v4/stats`;
-          const statsResponse = await fetch(statsUrl, {
+          const statsResponse = await this.fetchWithTimeout(statsUrl, {
             headers: {
               Authorization: `Basic ${Buffer.from(`${connection.username}:${connection.password}`).toString('base64')}`,
             },
@@ -532,7 +534,7 @@ export class CrawlerService {
       this.logger.log(`LinkedIn 통계 수집 시작: ${connection.accountUrl}`);
 
       // LinkedIn API를 사용하여 사용자 ID 가져오기
-      const userInfoResponse = await fetch(
+      const userInfoResponse = await this.fetchWithTimeout(
         'https://api.linkedin.com/v2/userinfo',
         {
           headers: {
@@ -554,7 +556,7 @@ export class CrawlerService {
 
       // LinkedIn API v2를 사용하여 게시물 목록 가져오기
       // 참고: LinkedIn API는 게시물 통계에 제한이 있을 수 있음
-      const postsResponse = await fetch(
+      const postsResponse = await this.fetchWithTimeout(
         `https://api.linkedin.com/v2/ugcPosts?q=authors&authors=List(urn:li:person:${userId})&count=50`,
         {
           headers: {
@@ -876,6 +878,13 @@ export class CrawlerService {
     });
 
     for (const connection of connections) {
+      if (connection.platform === MediaPlatform.LINKEDIN && !connection.accessToken) {
+        this.logger.debug(
+          'LinkedIn stats collection skipped: access token is missing.',
+        );
+        continue;
+      }
+
       try {
         let stats: BlogStats | null = null;
 
@@ -1016,6 +1025,56 @@ export class CrawlerService {
   private extractTistoryBlogName(url: string): string {
     const match = url.match(/https?:\/\/([^.]+)\.tistory\.com/);
     return match ? match[1] : '';
+  }
+
+  private getWordPressApiRoot(connection: MediaConnection): string | null {
+    const rawUrl = connection.apiUrl || connection.accountUrl;
+    if (!rawUrl) {
+      return null;
+    }
+
+    try {
+      const urlWithProtocol = /^https?:\/\//i.test(rawUrl)
+        ? rawUrl
+        : `https://${rawUrl}`;
+      const url = new URL(urlWithProtocol.trim());
+      const pathname = url.pathname.replace(/\/+$/, '');
+      const wpJsonIndex = pathname.indexOf('/wp-json');
+
+      if (wpJsonIndex >= 0) {
+        url.pathname = pathname.slice(0, wpJsonIndex + '/wp-json'.length);
+      } else if (connection.apiUrl) {
+        url.pathname = `${pathname}/wp-json`;
+      } else {
+        url.pathname = '/wp-json';
+      }
+
+      url.search = '';
+      url.hash = '';
+
+      return url.toString().replace(/\/$/, '');
+    } catch {
+      this.logger.warn(`Invalid WordPress URL for stats collection: ${rawUrl}`);
+      return null;
+    }
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: Parameters<typeof fetch>[1] = {},
+    timeoutMs = 10000,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      return await fetch(url, {
+        ...(init || {}),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   /**
