@@ -87,11 +87,13 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
   // ── 글 등록 이력 ──
 
   async findPosts(userId: string): Promise<BacklinkPost[]> {
-    return this.postRepository.find({
+    const posts = await this.postRepository.find({
       where: { userId },
       relations: ['authoritySite'],
       order: { createdAt: 'DESC' },
     });
+
+    return posts.map((post) => this.sanitizePostForResponse(post));
   }
 
   @Cron('*/10 * * * *')
@@ -554,6 +556,14 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     }
 
     return post.createdAt;
+  }
+
+  private sanitizePostForResponse(post: BacklinkPost): BacklinkPost {
+    if (post.errorMessage?.startsWith(this.processingStartedMarker)) {
+      post.errorMessage = undefined;
+    }
+
+    return post;
   }
 
   private async withTimeout<T>(
