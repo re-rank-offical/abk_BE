@@ -1,7 +1,12 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, Not, IsNull } from 'typeorm';
+import { Repository, In, Not, IsNull, LessThan } from 'typeorm';
 import { Browser, BrowserContext, Page, Frame } from 'playwright-core';
 
 import {
@@ -16,9 +21,12 @@ import { CreateAuthoritySiteDto } from './dto/create-authority-site.dto';
 import { UpdateAuthoritySiteDto } from './dto/update-authority-site.dto';
 
 @Injectable()
-export class BacklinkSitesService {
+export class BacklinkSitesService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BacklinkSitesService.name);
   private proxyIndex = 0;
+  private isRecoveringPendingPosts = false;
+  private readonly pendingRetryAfterMs = 90 * 60 * 1000;
+  private readonly pendingExpireAfterMs = 24 * 60 * 60 * 1000;
   private publishMutex = Promise.resolve(); // 글 단위 발행 직렬화
 
   constructor(
@@ -27,6 +35,16 @@ export class BacklinkSitesService {
     @InjectRepository(BacklinkPost)
     private readonly postRepository: Repository<BacklinkPost>,
   ) {}
+
+  onApplicationBootstrap(): void {
+    setTimeout(() => {
+      this.reconcilePendingPosts().catch((err) =>
+        this.logger.error(
+          `Pending backlink post reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }, 10000);
+  }
 
   // ── CRUD ──
 
@@ -70,6 +88,86 @@ export class BacklinkSitesService {
       relations: ['authoritySite'],
       order: { createdAt: 'DESC' },
     });
+  }
+
+  @Cron('*/10 * * * *')
+  async reconcilePendingPosts(): Promise<void> {
+    if (this.isRecoveringPendingPosts) {
+      return;
+    }
+
+    this.isRecoveringPendingPosts = true;
+
+    try {
+      const now = Date.now();
+      const retryBefore = new Date(now - this.pendingRetryAfterMs);
+      const expireBefore = new Date(now - this.pendingExpireAfterMs);
+
+      const expired = await this.postRepository.find({
+        where: {
+          status: PostStatus.PENDING,
+          createdAt: LessThan(expireBefore),
+        },
+      });
+
+      if (expired.length > 0) {
+        await Promise.all(
+          expired.map((post) =>
+            this.postRepository.update(post.id, {
+              status: PostStatus.TIMED_OUT,
+              errorMessage:
+                '발행 작업이 서버 재시작 또는 중단으로 완료 상태를 기록하지 못했습니다. 실제 발행 여부를 확인해주세요.',
+            }),
+          ),
+        );
+        this.logger.warn(
+          `Marked ${expired.length} stale backlink post(s) as TIMED_OUT.`,
+        );
+      }
+
+      const recoverable = await this.postRepository.find({
+        where: {
+          status: PostStatus.PENDING,
+          createdAt: LessThan(retryBefore),
+        },
+        relations: ['authoritySite'],
+        order: { createdAt: 'ASC' },
+        take: 20,
+      });
+
+      const postsToRecover = recoverable.filter(
+        (post) =>
+          post.createdAt.getTime() >= expireBefore.getTime() &&
+          post.authoritySite,
+      );
+
+      if (postsToRecover.length === 0) {
+        return;
+      }
+
+      this.logger.warn(
+        `Recovering ${postsToRecover.length} pending backlink post(s).`,
+      );
+
+      for (const post of postsToRecover) {
+        const current = await this.postRepository.findOne({
+          where: { id: post.id },
+        });
+
+        if (!current || current.status !== PostStatus.PENDING) {
+          continue;
+        }
+
+        await this.executeAndUpdatePost(
+          post.authoritySite,
+          current,
+          post.title,
+          post.body,
+        );
+      }
+    } finally {
+      this.isRecoveringPendingPosts = false;
+    }
   }
 
   // ── 쿠키 Keep-Alive (12시간마다) ──

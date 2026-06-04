@@ -12,6 +12,7 @@ export enum PostStatus {
   PENDING = "PENDING",
   SUCCESS = "SUCCESS",
   FAILED = "FAILED",
+  TIMED_OUT = "TIMED_OUT",
 }
 
 @Entity("backlink_posts")
