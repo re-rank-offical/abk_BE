@@ -10,6 +10,7 @@ import { AuthoritySite } from "./authority-site.entity";
 
 export enum PostStatus {
   PENDING = "PENDING",
+  PROCESSING = "PROCESSING",
   SUCCESS = "SUCCESS",
   FAILED = "FAILED",
   TIMED_OUT = "TIMED_OUT",

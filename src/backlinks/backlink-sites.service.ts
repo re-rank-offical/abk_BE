@@ -27,6 +27,10 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
   private isRecoveringPendingPosts = false;
   private readonly pendingRetryAfterMs = 90 * 60 * 1000;
   private readonly pendingExpireAfterMs = 24 * 60 * 60 * 1000;
+  private readonly processingExpireAfterMs = 60 * 60 * 1000;
+  private readonly singlePublishTimeoutMs = 20 * 60 * 1000;
+  private readonly processingStartedMarker = 'PROCESSING_STARTED_AT=';
+  private readonly activePostIds = new Set<string>();
   private publishMutex = Promise.resolve(); // 글 단위 발행 직렬화
 
   constructor(
@@ -103,37 +107,67 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       const retryBefore = new Date(now - this.pendingRetryAfterMs);
       const expireBefore = new Date(now - this.pendingExpireAfterMs);
 
-      const expired = await this.postRepository.find({
-        where: {
-          status: PostStatus.PENDING,
-          createdAt: LessThan(expireBefore),
-        },
-      });
+      const expiredPending = (
+        await this.postRepository.find({
+          where: {
+            status: PostStatus.PENDING,
+            createdAt: LessThan(expireBefore),
+          },
+        })
+      ).filter((post) => !this.activePostIds.has(post.id));
 
-      if (expired.length > 0) {
+      if (expiredPending.length > 0) {
         await Promise.all(
-          expired.map((post) =>
+          expiredPending.map((post) =>
             this.postRepository.update(post.id, {
               status: PostStatus.TIMED_OUT,
               errorMessage:
-                '발행 작업이 서버 재시작 또는 중단으로 완료 상태를 기록하지 못했습니다. 실제 발행 여부를 확인해주세요.',
+                '발행 작업이 시작되지 못한 채 오래 대기했습니다. 실제 발행 여부를 확인해주세요.',
             }),
           ),
         );
         this.logger.warn(
-          `Marked ${expired.length} stale backlink post(s) as TIMED_OUT.`,
+          `Marked ${expiredPending.length} stale pending backlink post(s) as TIMED_OUT.`,
         );
       }
 
-      const recoverable = await this.postRepository.find({
-        where: {
-          status: PostStatus.PENDING,
-          createdAt: LessThan(retryBefore),
-        },
-        relations: ['authoritySite'],
-        order: { createdAt: 'ASC' },
-        take: 20,
+      const processingPosts = (
+        await this.postRepository.find({
+          where: { status: PostStatus.PROCESSING },
+        })
+      ).filter((post) => !this.activePostIds.has(post.id));
+
+      const expiredProcessing = processingPosts.filter((post) => {
+        const startedAt = this.getProcessingStartedAt(post);
+        return now - startedAt.getTime() > this.processingExpireAfterMs;
       });
+
+      if (expiredProcessing.length > 0) {
+        await Promise.all(
+          expiredProcessing.map((post) =>
+            this.postRepository.update(post.id, {
+              status: PostStatus.TIMED_OUT,
+              errorMessage:
+                '발행 처리가 제한 시간을 초과했습니다. 중복 발행 방지를 위해 자동 재시도하지 않았습니다. 실제 발행 여부를 확인해주세요.',
+            }),
+          ),
+        );
+        this.logger.warn(
+          `Marked ${expiredProcessing.length} stale processing backlink post(s) as TIMED_OUT.`,
+        );
+      }
+
+      const recoverable = (
+        await this.postRepository.find({
+          where: {
+            status: PostStatus.PENDING,
+            createdAt: LessThan(retryBefore),
+          },
+          relations: ['authoritySite'],
+          order: { createdAt: 'ASC' },
+          take: 20,
+        })
+      ).filter((post) => !this.activePostIds.has(post.id));
 
       const postsToRecover = recoverable.filter(
         (post) =>
@@ -310,6 +344,10 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       pendingPosts.push(await this.postRepository.save(post));
     }
 
+    for (const post of pendingPosts) {
+      this.activePostIds.add(post.id);
+    }
+
     // 2) 백그라운드에서 실제 발행 시작 (뮤텍스로 글 단위 직렬화)
     const postMap = new Map<string, BacklinkPost>();
     for (const post of pendingPosts) {
@@ -324,6 +362,15 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       )
       .catch((err) => {
         this.logger.error('백그라운드 발행 중 예외 발생', err);
+        return this.markUnfinishedPostsFailed(
+          postMap,
+          err instanceof Error ? err.message : String(err),
+        );
+      })
+      .finally(() => {
+        for (const post of pendingPosts) {
+          this.activePostIds.delete(post.id);
+        }
       });
 
     // 3) PENDING 레코드를 즉시 반환 (HTTP 응답 즉시 완료)
@@ -442,7 +489,23 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     body: string,
   ): Promise<BacklinkPost> {
     try {
-      const result = await this.publishToSingleSite(site, title, body);
+      if (
+        post.status !== PostStatus.PENDING &&
+        post.status !== PostStatus.PROCESSING
+      ) {
+        return post;
+      }
+
+      post.status = PostStatus.PROCESSING;
+      post.errorMessage = `${this.processingStartedMarker}${new Date().toISOString()}`;
+      post.publishedUrl = undefined;
+      await this.postRepository.save(post);
+
+      const result = await this.withTimeout(
+        this.publishToSingleSite(site, title, body),
+        this.singlePublishTimeoutMs,
+        `${site.siteName} 발행 시간이 ${Math.round(this.singlePublishTimeoutMs / 60000)}분을 초과했습니다.`,
+      );
       post.status = result.success ? PostStatus.SUCCESS : PostStatus.FAILED;
       post.publishedUrl = result.publishedUrl ?? undefined;
       post.errorMessage = result.error ?? undefined;
@@ -452,6 +515,62 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     }
 
     return this.postRepository.save(post);
+  }
+
+  private async markUnfinishedPostsFailed(
+    postMap: Map<string, BacklinkPost>,
+    message: string,
+  ): Promise<void> {
+    const posts = Array.from(postMap.values());
+
+    await Promise.all(
+      posts.map(async (post) => {
+        const current = await this.postRepository.findOne({
+          where: { id: post.id },
+        });
+
+        if (
+          !current ||
+          (current.status !== PostStatus.PENDING &&
+            current.status !== PostStatus.PROCESSING)
+        ) {
+          return;
+        }
+
+        current.status = PostStatus.FAILED;
+        current.errorMessage = `백그라운드 발행 작업이 중단되었습니다: ${message}`;
+        await this.postRepository.save(current);
+      }),
+    );
+  }
+
+  private getProcessingStartedAt(post: BacklinkPost): Date {
+    const raw = post.errorMessage || '';
+    if (raw.startsWith(this.processingStartedMarker)) {
+      const parsed = new Date(raw.slice(this.processingStartedMarker.length));
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed;
+      }
+    }
+
+    return post.createdAt;
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string,
+  ): Promise<T> {
+    let timeout: NodeJS.Timeout;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timeout!);
+    }
   }
 
   private async publishToSingleSite(
