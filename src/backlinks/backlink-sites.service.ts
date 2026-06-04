@@ -7,7 +7,13 @@ import {
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, Not, IsNull, LessThan } from 'typeorm';
-import { Browser, BrowserContext, Page, Frame } from 'playwright-core';
+import {
+  Browser,
+  BrowserContext,
+  Page,
+  Frame,
+  chromium,
+} from 'playwright-core';
 
 import {
   AuthoritySite,
@@ -439,7 +445,7 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       this.logger.log(
         `기타 ${otherSites.length}개 사이트 발행 시작 (동시 2개)`,
       );
-      const OTHER_CONCURRENCY = 2;
+      const OTHER_CONCURRENCY = 1;
       for (let i = 0; i < otherSites.length; i += OTHER_CONCURRENCY) {
         if (i > 0) {
           const delay = 5000 + Math.random() * 5000;
@@ -1005,52 +1011,16 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
           }
         }
 
-        // 카카오 로그인 폼
-        this.logger.log(`카카오 로그인 폼 URL: ${page.url()}`);
-        const emailInput = await page.$(
-          'input[name="loginId"], input[name="loginKey"], #loginId--1',
+        const loginResult = await this.loginToKakao(
+          page,
+          site.loginUsername,
+          site.loginPassword,
         );
-        if (emailInput) {
-          await emailInput.click();
-          await emailInput.fill(site.loginUsername);
-        } else {
-          this.logger.warn('카카오 이메일 입력 필드를 찾지 못함');
-        }
 
-        const pwInput = await page.$('input[name="password"], #password--2');
-        if (pwInput) {
-          await pwInput.click();
-          await pwInput.fill(site.loginPassword);
-        } else {
-          this.logger.warn('카카오 비밀번호 입력 필드를 찾지 못함');
-        }
-
-        // 로그인 버튼 클릭
-        const loginBtn = await page.$(
-          'button[type="submit"], .btn_g.btn_confirm.submit',
-        );
-        if (loginBtn) {
-          await loginBtn.click();
-          await page.waitForTimeout(5000);
-          this.logger.log(`로그인 후 URL: ${page.url()}`);
-        } else {
-          this.logger.warn('로그인 버튼을 찾지 못함');
-        }
-
-        // 로그인 성공 여부 확인
-        const postLoginUrl = page.url();
-        this.logger.log(`로그인 시도 후 URL: ${postLoginUrl}`);
-
-        if (
-          postLoginUrl.includes('accounts.kakao.com') ||
-          postLoginUrl.includes('tistory.com/auth/login')
-        ) {
-          this.logger.error(
-            `카카오 로그인 실패 – 여전히 로그인 페이지: ${postLoginUrl}`,
-          );
+        if (!loginResult.success) {
           return {
             success: false,
-            error: `카카오 로그인에 실패했습니다. 계정 정보를 확인하세요. (URL: ${postLoginUrl})`,
+            error: loginResult.error,
           };
         }
 
@@ -1062,7 +1032,7 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
         this.logger.log('로그인 성공 – 쿠키 저장 완료');
 
         // 글쓰기 페이지로 다시 이동
-        if (!postLoginUrl.includes('/manage/newpost')) {
+        if (!loginResult.url.includes('/manage/newpost')) {
           await page.goto(writeUrl, {
             waitUntil: 'domcontentloaded',
             timeout: 30000,
@@ -1648,6 +1618,257 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
 
   // ── 유틸리티 ──
 
+  private async loginToKakao(
+    page: Page,
+    username: string,
+    password: string,
+  ): Promise<{ success: boolean; url: string; error?: string }> {
+    this.logger.log(`카카오 로그인 폼 URL: ${page.url()}`);
+    await page.waitForTimeout(2000);
+
+    try {
+      const saveLoginCheckbox = page.getByRole('checkbox', {
+        name: /간편로그인 정보 저장|로그인 정보 저장|Save Login/i,
+      });
+      if (await saveLoginCheckbox.isVisible({ timeout: 1500 })) {
+        const checked = await saveLoginCheckbox.isChecked();
+        if (!checked) {
+          await saveLoginCheckbox.click({ timeout: 3000 });
+        }
+      }
+    } catch {
+      // optional checkbox
+    }
+
+    const emailEntered = await this.fillFirstVisible(page, [
+      {
+        roleName: /계정정보 입력|Enter Account Information/i,
+        value: username,
+      },
+      {
+        selectors: [
+          'input[name="loginId"]',
+          'input[name="loginKey"]',
+          '#loginId',
+          '[id^="loginId"]',
+          'input[placeholder*="카카오메일"]',
+          'input[placeholder*="이메일"]',
+          'input[placeholder*="Account"]',
+          'input[type="email"]',
+          'input[type="text"]:not([type="hidden"])',
+          'input:not([type="password"]):not([type="hidden"]):not([type="checkbox"])',
+        ],
+        value: username,
+      },
+    ]);
+
+    const passwordEntered = await this.fillFirstVisible(page, [
+      {
+        roleName: /비밀번호 입력|Enter Pa|Password/i,
+        value: password,
+      },
+      {
+        selectors: [
+          'input[type="password"]',
+          'input[name="password"]',
+          '#password',
+          '[id^="password"]',
+          'input[placeholder*="비밀번호"]',
+          'input[placeholder*="Password"]',
+        ],
+        value: password,
+      },
+    ]);
+
+    if (!emailEntered || !passwordEntered) {
+      return {
+        success: false,
+        url: page.url(),
+        error:
+          '카카오 로그인 입력 폼을 찾지 못했습니다. 카카오 로그인 페이지 구조가 변경되었거나 추가 인증 화면이 먼저 표시되었습니다.',
+      };
+    }
+
+    await page.waitForTimeout(500);
+
+    let loginClicked = false;
+    try {
+      const loginButton = page.getByRole('button', { name: /Log In|로그인/i });
+      if (await loginButton.isVisible({ timeout: 2000 })) {
+        await loginButton.click();
+        loginClicked = true;
+      }
+    } catch {
+      // fallback below
+    }
+
+    if (!loginClicked) {
+      const selectors = [
+        'button[type="submit"]',
+        'button.btn_confirm',
+        'button.submit',
+        '.btn_g.btn_confirm.submit',
+        'input[type="submit"]',
+      ];
+
+      for (const selector of selectors) {
+        const button = await page.$(selector);
+        if (button && (await button.isVisible().catch(() => false))) {
+          await button.click();
+          loginClicked = true;
+          break;
+        }
+      }
+    }
+
+    if (!loginClicked) {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForTimeout(8000);
+
+    const resultUrl = page.url();
+    this.logger.log(`로그인 시도 후 URL: ${resultUrl}`);
+
+    const pageText = (await page.textContent('body').catch(() => '')) || '';
+    const errorText = await this.extractVisibleText(page, [
+      '.error_message',
+      '.txt_error',
+      '.login_error',
+      '[class*="error"]:not([class*="checkbox"])',
+      '[class*="Error"]',
+    ]);
+
+    if (this.hasKakaoVerificationChallenge(resultUrl, pageText)) {
+      return {
+        success: false,
+        url: resultUrl,
+        error:
+          '카카오 2단계 인증 또는 본인 확인이 필요합니다. 브라우저에서 해당 카카오 계정으로 직접 로그인해 보안 확인을 완료한 뒤 다시 시도해주세요.',
+      };
+    }
+
+    if (errorText) {
+      return {
+        success: false,
+        url: resultUrl,
+        error: `카카오 로그인 실패: ${errorText}`,
+      };
+    }
+
+    if (
+      resultUrl.includes('accounts.kakao.com') ||
+      resultUrl.includes('tistory.com/auth/login')
+    ) {
+      return {
+        success: false,
+        url: resultUrl,
+        error:
+          '카카오 로그인에 실패했습니다. 계정 정보가 맞더라도 카카오 보안 확인, CAPTCHA, 휴면/잠금 상태, 또는 로그인 차단이 있으면 자동 로그인이 실패합니다.',
+      };
+    }
+
+    return { success: true, url: resultUrl };
+  }
+
+  private async fillFirstVisible(
+    page: Page,
+    attempts: Array<{
+      roleName?: RegExp;
+      selectors?: string[];
+      value: string;
+    }>,
+  ): Promise<boolean> {
+    for (const attempt of attempts) {
+      if (attempt.roleName) {
+        try {
+          const locator = page.getByRole('textbox', {
+            name: attempt.roleName,
+          });
+          if (await locator.isVisible({ timeout: 1500 })) {
+            await locator.click();
+            await locator.fill(attempt.value);
+            return true;
+          }
+        } catch {
+          // try selectors
+        }
+      }
+
+      for (const selector of attempt.selectors || []) {
+        const element = await page.$(selector);
+        if (element && (await element.isVisible().catch(() => false))) {
+          await element.click();
+          await element.fill(attempt.value);
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private async extractVisibleText(
+    page: Page,
+    selectors: string[],
+  ): Promise<string | null> {
+    for (const selector of selectors) {
+      const element = await page.$(selector);
+      if (!element || !(await element.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      const text = (await element.textContent())?.trim();
+      if (text && !text.toLowerCase().includes('checkbox')) {
+        return text;
+      }
+    }
+
+    return null;
+  }
+
+  private hasKakaoVerificationChallenge(url: string, pageText: string): boolean {
+    const lowerUrl = url.toLowerCase();
+    const indicators = [
+      'two-step',
+      '2step',
+      'twostep',
+      'verify',
+      'verification',
+      'confirm',
+      'confirmation',
+      'security',
+      'authenticate',
+      'passcode',
+      'otp',
+    ];
+
+    if (indicators.some((indicator) => lowerUrl.includes(indicator))) {
+      return true;
+    }
+
+    const verificationTexts = [
+      '본인 확인',
+      '본인확인',
+      '인증번호',
+      '인증 번호',
+      '2단계 인증',
+      '2차 인증',
+      '보안 인증',
+      '추가 인증',
+      '휴면',
+      '잠금',
+      'captcha',
+      'verification',
+      'verify',
+    ];
+
+    const lowerText = pageText.toLowerCase();
+    return verificationTexts.some((text) =>
+      lowerText.includes(text.toLowerCase()),
+    );
+  }
+
   /** PROXY_HOSTS에서 사이트별 고정 IP 선택 (같은 siteKey → 같은 IP) */
   private pickProxyForSite(siteKey?: string): {
     host: string;
@@ -1713,34 +1934,44 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       `CloakBrowser 스텔스 브라우저 실행${proxy ? ` (Proxy: ${proxy.host}:${proxy.port})` : ''}`,
     );
 
+    const launchOptions: Record<string, unknown> = {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+      ],
+    };
+
+    if (proxy) {
+      launchOptions.proxy = {
+        server: `http://${proxy.host}:${proxy.port}`,
+        username: proxy.username,
+        password: proxy.password,
+      };
+    } else if (options?.useResidentialProxy) {
+      this.logger.warn('PROXY_* 환경변수 미설정 – 프록시 없이 실행');
+    }
+
     try {
       const { launch } = await (Function(
         'return import("cloakbrowser")',
       )() as Promise<typeof import('cloakbrowser')>);
 
-      const launchOptions: Record<string, unknown> = {
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-        ],
-      };
-
-      if (proxy) {
-        launchOptions.proxy = {
-          server: `http://${proxy.host}:${proxy.port}`,
-          username: proxy.username,
-          password: proxy.password,
-        };
-      } else if (options?.useResidentialProxy) {
-        this.logger.warn('PROXY_* 환경변수 미설정 – 프록시 없이 실행');
-      }
-
       return (await launch(launchOptions)) as unknown as Browser;
     } catch (err) {
+      this.logger.warn(
+        `CloakBrowser 실행 실패, 기본 Chromium으로 재시도: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    try {
+      return await chromium.launch(launchOptions);
+    } catch (err) {
       this.logger.error(
-        `브라우저 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
+        `기본 Chromium 실행 실패: ${err instanceof Error ? err.message : String(err)}`,
       );
       throw err;
     }
