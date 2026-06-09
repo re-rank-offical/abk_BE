@@ -74,4 +74,20 @@ export class BacklinkSitesController {
   findPosts(@CurrentUser() user: AuthUser) {
     return this.service.findPosts(user.userId);
   }
+
+  @Post(':id/save-cookies')
+  @ApiOperation({ summary: '카카오 세션 쿠키 수동 저장' })
+  saveCookies(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Body('cookies') cookies: string,
+  ) {
+    return this.service.saveCookies(id, user.userId, cookies);
+  }
+
+  @Post(':id/verify-session')
+  @ApiOperation({ summary: '저장된 세션 쿠키 유효성 검증' })
+  verifySession(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return this.service.verifySession(id, user.userId);
+  }
 }

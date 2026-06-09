@@ -2616,6 +2616,198 @@ ANSWER: [정확히 ${blankCount}글자만]`,
     }
   }
 
+  // ── 수동 카카오 인증 (쿠키 저장 / 세션 검증) ──
+
+  /**
+   * 사용자가 브라우저에서 직접 복사한 쿠키를 저장한다.
+   * JSON 배열, key=value 문자열, Chrome DevTools 탭 구분 형식을 모두 지원.
+   */
+  async saveCookies(
+    id: string,
+    userId: string,
+    rawCookies: string,
+  ): Promise<{ success: boolean; message: string }> {
+    const site = await this.siteRepository.findOne({ where: { id, userId } });
+    if (!site) throw new NotFoundException('사이트를 찾을 수 없습니다.');
+
+    const trimmed = rawCookies.trim();
+    if (!trimmed) {
+      return { success: false, message: '쿠키 값이 비어있습니다.' };
+    }
+
+    let normalizedCookies: string;
+
+    // 1) JSON 배열 형식 (Playwright 쿠키 / EditThisCookie 등)
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          return { success: false, message: '유효한 쿠키 배열이 아닙니다.' };
+        }
+        // Playwright 형식이면 그대로, 아니면 변환
+        const hasName = parsed.every(
+          (c: Record<string, unknown>) => typeof c.name === 'string',
+        );
+        if (!hasName) {
+          return {
+            success: false,
+            message: '각 쿠키 객체에 name 필드가 필요합니다.',
+          };
+        }
+        normalizedCookies = JSON.stringify(parsed);
+      } catch {
+        return { success: false, message: '쿠키 JSON 파싱에 실패했습니다.' };
+      }
+    }
+    // 2) Chrome DevTools 탭 구분 형식
+    else if (trimmed.includes('\t')) {
+      const domain = '.tistory.com';
+      const lines = trimmed.split('\n').filter((line) => line.trim());
+      const cookies: Array<Record<string, unknown>> = [];
+
+      for (const line of lines) {
+        const parts = line.split('\t');
+        if (parts.length >= 2) {
+          const name = parts[0].trim();
+          const value = parts[1].trim();
+          if (name && name.toLowerCase() !== 'name') {
+            cookies.push({ name, value, domain, path: '/' });
+          }
+        }
+      }
+
+      if (cookies.length === 0) {
+        return { success: false, message: '유효한 쿠키를 찾을 수 없습니다.' };
+      }
+      normalizedCookies = JSON.stringify(cookies);
+    }
+    // 3) key=value; key=value 문자열 형식
+    else {
+      const blogHostname = new URL(site.siteUrl).hostname;
+      const domain = blogHostname.includes('tistory.com')
+        ? '.tistory.com'
+        : blogHostname;
+
+      const cookies = trimmed
+        .split(';')
+        .map((pair) => pair.trim())
+        .filter((pair) => pair.includes('='))
+        .map((pair) => {
+          const [name, ...rest] = pair.split('=');
+          return {
+            name: name.trim(),
+            value: rest.join('=').trim(),
+            domain,
+            path: '/',
+          };
+        });
+
+      if (cookies.length === 0) {
+        return { success: false, message: '유효한 쿠키를 찾을 수 없습니다.' };
+      }
+      normalizedCookies = JSON.stringify(cookies);
+    }
+
+    await this.siteRepository.update(id, {
+      sessionCookies: normalizedCookies,
+    });
+
+    return {
+      success: true,
+      message: `쿠키가 저장되었습니다 (${JSON.parse(normalizedCookies).length}개).`,
+    };
+  }
+
+  /**
+   * 저장된 세션 쿠키가 유효한지 티스토리 관리 페이지 접근으로 검증한다.
+   */
+  async verifySession(
+    id: string,
+    userId: string,
+  ): Promise<{ valid: boolean; message: string }> {
+    const site = await this.siteRepository.findOne({ where: { id, userId } });
+    if (!site) throw new NotFoundException('사이트를 찾을 수 없습니다.');
+
+    if (!site.sessionCookies) {
+      return { valid: false, message: '저장된 세션 쿠키가 없습니다.' };
+    }
+
+    let browser: Browser | null = null;
+    let context: BrowserContext | null = null;
+
+    try {
+      const blogName =
+        (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] || '';
+      if (!blogName) {
+        return {
+          valid: false,
+          message: '블로그 URL에서 블로그명을 파싱할 수 없습니다.',
+        };
+      }
+
+      browser = await this.createBrowser({
+        useResidentialProxy: true,
+        siteKey: site.id,
+      });
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
+        ignoreHTTPSErrors: true,
+      });
+
+      const cookies = JSON.parse(site.sessionCookies);
+      await context.addCookies(cookies);
+
+      const page = await context.newPage();
+      await page.goto(`https://${blogName}.tistory.com/manage/`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      });
+      await page.waitForTimeout(3000);
+
+      const currentUrl = page.url();
+
+      if (
+        currentUrl.includes('tistory.com/auth/login') ||
+        currentUrl.includes('accounts.kakao.com')
+      ) {
+        return {
+          valid: false,
+          message:
+            '세션이 만료되었습니다. 카카오 로그인 후 쿠키를 다시 저장해주세요.',
+        };
+      }
+
+      // 쿠키 갱신 (방문으로 세션 연장됨)
+      const freshCookies = await context.cookies();
+      await this.siteRepository.update(site.id, {
+        sessionCookies: JSON.stringify(freshCookies),
+      });
+
+      return {
+        valid: true,
+        message: '세션이 유효합니다. 정상적으로 발행할 수 있습니다.',
+      };
+    } catch (err) {
+      return {
+        valid: false,
+        message: `세션 검증 중 오류: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    } finally {
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   private parseCookieString(
     cookies: string,
     domain: string,
