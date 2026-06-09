@@ -1,8 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { chromium, Browser, Page, BrowserContext } from 'playwright-core';
-import * as fs from 'fs';
-import { execSync } from 'child_process';
 import { MediaPlatform } from '../database/entities/media-connection.entity';
+import { resolveChromiumPath } from '../common/utils/chromium-path.util';
 
 interface AuthResult {
   success: boolean;
@@ -33,57 +32,7 @@ export class PlaywrightAuthService {
    */
   private async getBrowser(): Promise<Browser> {
     if (!this.browser || !this.browser.isConnected()) {
-      // fs, execSync는 top-level에서 import됨
-
-      let execPath: string | undefined = undefined;
-
-      // 1. 환경변수로 직접 지정된 경로 확인
-      if (
-        process.env.CHROMIUM_PATH &&
-        fs.existsSync(process.env.CHROMIUM_PATH)
-      ) {
-        execPath = process.env.CHROMIUM_PATH;
-        this.logger.log(`환경변수 CHROMIUM_PATH 사용: ${execPath}`);
-      }
-
-      // 2. 시스템 chromium 찾기 (nixpacks 환경)
-      if (!execPath) {
-        try {
-          const systemChromium = execSync(
-            'which chromium || which chromium-browser || which google-chrome',
-            { encoding: 'utf-8' },
-          ).trim();
-          if (systemChromium && fs.existsSync(systemChromium)) {
-            execPath = systemChromium;
-            this.logger.log(`시스템 Chromium 발견: ${execPath}`);
-          }
-        } catch {
-          this.logger.log('시스템 Chromium을 찾을 수 없음');
-        }
-      }
-
-      // 3. Playwright 번들 Chromium 경로 확인
-      if (!execPath) {
-        const playwrightPath =
-          process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
-        const possiblePaths = [
-          `${playwrightPath}/chromium-1200/chrome-linux64/chrome`,
-          `${playwrightPath}/chromium-1200/chrome-linux/chrome`,
-          `${playwrightPath}/chromium_headless_shell-1200/chrome-linux64/headless_shell`,
-        ];
-
-        for (const path of possiblePaths) {
-          if (fs.existsSync(path)) {
-            execPath = path;
-            this.logger.log(`Playwright Chromium 발견: ${execPath}`);
-            break;
-          }
-        }
-      }
-
-      this.logger.log(
-        `최종 브라우저 경로: ${execPath || 'Playwright 기본값 사용'}`,
-      );
+      const execPath = resolveChromiumPath();
 
       this.browser = await chromium.launch({
         headless: true,
@@ -123,47 +72,7 @@ export class PlaywrightAuthService {
    * 서버리스 환경에서 안정성을 위해 공유 브라우저 대신 사용
    */
   private async createFreshBrowser(): Promise<Browser> {
-    // fs, execSync는 top-level에서 import됨
-
-    let execPath: string | undefined = undefined;
-
-    if (process.env.CHROMIUM_PATH && fs.existsSync(process.env.CHROMIUM_PATH)) {
-      execPath = process.env.CHROMIUM_PATH;
-    }
-
-    if (!execPath) {
-      try {
-        const systemChromium = execSync(
-          'which chromium || which chromium-browser || which google-chrome',
-          { encoding: 'utf-8' },
-        ).trim();
-        if (systemChromium && fs.existsSync(systemChromium)) {
-          execPath = systemChromium;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    if (!execPath) {
-      const playwrightPath =
-        process.env.PLAYWRIGHT_BROWSERS_PATH || '/app/.cache/ms-playwright';
-      const possiblePaths = [
-        `${playwrightPath}/chromium-1200/chrome-linux64/chrome`,
-        `${playwrightPath}/chromium-1200/chrome-linux/chrome`,
-        `${playwrightPath}/chromium_headless_shell-1200/chrome-linux64/headless_shell`,
-      ];
-      for (const path of possiblePaths) {
-        if (fs.existsSync(path)) {
-          execPath = path;
-          break;
-        }
-      }
-    }
-
-    this.logger.log(
-      `발행용 새 브라우저 생성: ${execPath || 'Playwright 기본값'}`,
-    );
+    const execPath = resolveChromiumPath();
 
     return await chromium.launch({
       headless: true,

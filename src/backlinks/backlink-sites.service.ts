@@ -15,6 +15,7 @@ import {
   chromium,
 } from 'playwright-core';
 
+import { resolveChromiumPath } from '../common/utils/chromium-path.util';
 import {
   AuthoritySite,
   SiteType,
@@ -1827,7 +1828,10 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     return null;
   }
 
-  private hasKakaoVerificationChallenge(url: string, pageText: string): boolean {
+  private hasKakaoVerificationChallenge(
+    url: string,
+    pageText: string,
+  ): boolean {
     const lowerUrl = url.toLowerCase();
     const indicators = [
       'two-step',
@@ -1934,8 +1938,11 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       `CloakBrowser 스텔스 브라우저 실행${proxy ? ` (Proxy: ${proxy.host}:${proxy.port})` : ''}`,
     );
 
+    const execPath = resolveChromiumPath();
+
     const launchOptions: Record<string, unknown> = {
       headless: true,
+      executablePath: execPath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
