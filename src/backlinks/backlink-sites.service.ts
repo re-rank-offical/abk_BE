@@ -2635,87 +2635,173 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       return { success: false, message: '쿠키 값이 비어있습니다.' };
     }
 
-    let normalizedCookies: string;
+    let blogHostname = '';
+    try {
+      blogHostname = new URL(site.siteUrl).hostname;
+    } catch {
+      /* siteUrl이 비정상이면 폴백 도메인 없이 진행 */
+    }
+    const fallbackDomain = blogHostname.includes('tistory.com')
+      ? '.tistory.com'
+      : blogHostname;
 
-    // 1) JSON 배열 형식 (Playwright 쿠키 / EditThisCookie 등)
+    // 입력 형식별로 원시 쿠키 배열을 만든 뒤, 공통 정규화/검증을 거친다.
+    let rawList: Array<Record<string, unknown>> = [];
+
+    // 1) JSON 배열 형식 (Playwright / Cookie-Editor / EditThisCookie 등)
     if (trimmed.startsWith('[')) {
       try {
         const parsed = JSON.parse(trimmed);
         if (!Array.isArray(parsed) || parsed.length === 0) {
           return { success: false, message: '유효한 쿠키 배열이 아닙니다.' };
         }
-        // Playwright 형식이면 그대로, 아니면 변환
-        const hasName = parsed.every(
-          (c: Record<string, unknown>) => typeof c.name === 'string',
-        );
-        if (!hasName) {
-          return {
-            success: false,
-            message: '각 쿠키 객체에 name 필드가 필요합니다.',
-          };
-        }
-        normalizedCookies = JSON.stringify(parsed);
+        rawList = parsed as Array<Record<string, unknown>>;
       } catch {
         return { success: false, message: '쿠키 JSON 파싱에 실패했습니다.' };
       }
     }
     // 2) Chrome DevTools 탭 구분 형식
     else if (trimmed.includes('\t')) {
-      const domain = '.tistory.com';
-      const lines = trimmed.split('\n').filter((line) => line.trim());
-      const cookies: Array<Record<string, unknown>> = [];
-
-      for (const line of lines) {
-        const parts = line.split('\t');
-        if (parts.length >= 2) {
+      rawList = trimmed
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line): Record<string, unknown> | null => {
+          const parts = line.split('\t');
+          if (parts.length < 2) return null;
           const name = parts[0].trim();
           const value = parts[1].trim();
-          if (name && name.toLowerCase() !== 'name') {
-            cookies.push({ name, value, domain, path: '/' });
-          }
-        }
-      }
-
-      if (cookies.length === 0) {
-        return { success: false, message: '유효한 쿠키를 찾을 수 없습니다.' };
-      }
-      normalizedCookies = JSON.stringify(cookies);
+          if (!name || name.toLowerCase() === 'name') return null;
+          return { name, value };
+        })
+        .filter((c): c is Record<string, unknown> => c !== null);
     }
     // 3) key=value; key=value 문자열 형식
     else {
-      const blogHostname = new URL(site.siteUrl).hostname;
-      const domain = blogHostname.includes('tistory.com')
-        ? '.tistory.com'
-        : blogHostname;
-
-      const cookies = trimmed
+      rawList = trimmed
         .split(';')
         .map((pair) => pair.trim())
         .filter((pair) => pair.includes('='))
         .map((pair) => {
-          const [name, ...rest] = pair.split('=');
+          // 첫 '='만 구분자로 사용 → base64 값의 '=' 패딩을 보존
+          const eq = pair.indexOf('=');
           return {
-            name: name.trim(),
-            value: rest.join('=').trim(),
-            domain,
-            path: '/',
+            name: pair.slice(0, eq).trim(),
+            value: pair.slice(eq + 1).trim(),
           };
         });
+    }
 
-      if (cookies.length === 0) {
-        return { success: false, message: '유효한 쿠키를 찾을 수 없습니다.' };
-      }
-      normalizedCookies = JSON.stringify(cookies);
+    // 공통 정규화: Playwright 호환 형태로 변환하고 비정상 쿠키는 제거
+    const normalized = this.normalizeToPlaywrightCookies(
+      rawList,
+      fallbackDomain,
+    );
+
+    if (normalized.length === 0) {
+      return {
+        success: false,
+        message:
+          '유효한 쿠키를 찾지 못했습니다. 브라우저 개발자도구(F12) > Application > Cookies에서 "이름=값" 쌍을 복사했는지 확인해주세요. (쿠키 값만 붙여넣으면 저장되지 않습니다)',
+      };
     }
 
     await this.siteRepository.update(id, {
-      sessionCookies: normalizedCookies,
+      sessionCookies: JSON.stringify(normalized),
     });
 
     return {
       success: true,
-      message: `쿠키가 저장되었습니다 (${JSON.parse(normalizedCookies).length}개).`,
+      message: `쿠키가 저장되었습니다 (${normalized.length}개).`,
     };
+  }
+
+  /** RFC 6265 토큰 규칙에 맞는 쿠키 이름인지 검사 (base64 값이 이름으로 잘못 들어오는 것 차단) */
+  private isValidCookieName(name: string): boolean {
+    // 토큰 허용 문자: 영숫자 및 일부 기호. '/', '=', 공백, 구분자는 불허.
+    // 실제 세션 쿠키 이름은 짧으므로(보통 <20자) 64자 초과는 base64 값으로 간주해 차단.
+    return /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/.test(name) && name.length <= 64;
+  }
+
+  /**
+   * 다양한 출처의 쿠키 객체를 Playwright addCookies가 받는 형태로 정규화한다.
+   * - 잘못된 이름(base64 값 등)·도메인 없는 쿠키 제거
+   * - Cookie-Editor의 expirationDate → expires, sameSite(no_restriction 등) 변환
+   */
+  private normalizeToPlaywrightCookies(
+    raw: Array<Record<string, unknown>>,
+    fallbackDomain: string,
+  ): Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: 'Strict' | 'Lax' | 'None';
+  }> {
+    const sameSiteMap: Record<string, 'Strict' | 'Lax' | 'None'> = {
+      strict: 'Strict',
+      lax: 'Lax',
+      none: 'None',
+      no_restriction: 'None',
+    };
+
+    const result: Array<{
+      name: string;
+      value: string;
+      domain: string;
+      path: string;
+      expires?: number;
+      httpOnly?: boolean;
+      secure?: boolean;
+      sameSite?: 'Strict' | 'Lax' | 'None';
+    }> = [];
+
+    for (const c of raw) {
+      const name = String(c.name ?? '').trim();
+      const value = String(c.value ?? '').trim();
+      if (!name || !this.isValidCookieName(name)) continue;
+
+      const domain =
+        (typeof c.domain === 'string' && c.domain.trim()) || fallbackDomain;
+      if (!domain) continue;
+
+      const path = (typeof c.path === 'string' && c.path.trim()) || '/';
+
+      const cookie: {
+        name: string;
+        value: string;
+        domain: string;
+        path: string;
+        expires?: number;
+        httpOnly?: boolean;
+        secure?: boolean;
+        sameSite?: 'Strict' | 'Lax' | 'None';
+      } = { name, value, domain, path };
+
+      const exp = (c.expires ?? c.expirationDate) as unknown;
+      if (typeof exp === 'number' && isFinite(exp) && exp > 0) {
+        cookie.expires = Math.floor(exp);
+      }
+      if (typeof c.httpOnly === 'boolean') cookie.httpOnly = c.httpOnly;
+      if (typeof c.secure === 'boolean') cookie.secure = c.secure;
+
+      const ss =
+        c.sameSite != null
+          ? sameSiteMap[String(c.sameSite).toLowerCase()]
+          : undefined;
+      if (ss) cookie.sameSite = ss;
+      // sameSite=None은 secure=true가 필수 → 아니면 제거하여 addCookies 거부 방지
+      if (cookie.sameSite === 'None' && cookie.secure !== true) {
+        delete cookie.sameSite;
+      }
+
+      result.push(cookie);
+    }
+
+    return result;
   }
 
   /**
