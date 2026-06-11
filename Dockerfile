@@ -29,6 +29,10 @@ COPY package*.json ./
 # Install production dependencies only
 RUN npm ci --omit=dev
 
+# 설치된 playwright-core 드라이버 버전과 일치하는 Chromium 설치
+# (베이스 이미지 버전과 npm 패키지 버전이 어긋나도 launch 실패하지 않도록 보장)
+RUN npx playwright-core install --with-deps chromium
+
 # CloakBrowser 스텔스 Chromium 바이너리 다운로드
 RUN npx cloakbrowser install
 
