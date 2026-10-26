@@ -93,14 +93,30 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
 
   // ── 글 등록 이력 ──
 
-  async findPosts(userId: string): Promise<BacklinkPost[]> {
-    const posts = await this.postRepository.find({
+  async findPosts(
+    userId: string,
+    page = 1,
+    limit = 30,
+  ): Promise<{
+    items: BacklinkPost[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const [posts, total] = await this.postRepository.findAndCount({
       where: { userId },
       relations: ['authoritySite'],
       order: { createdAt: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
     });
 
-    return posts.map((post) => this.sanitizePostForResponse(post));
+    return {
+      items: posts.map((post) => this.sanitizePostForResponse(post)),
+      total,
+      page,
+      limit,
+    };
   }
 
   @Cron('*/10 * * * *')

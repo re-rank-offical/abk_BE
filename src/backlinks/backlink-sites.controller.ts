@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   HttpCode,
 } from '@nestjs/common';
@@ -70,9 +71,15 @@ export class BacklinkSitesController {
   }
 
   @Get('posts')
-  @ApiOperation({ summary: '글 등록 이력 조회' })
-  findPosts(@CurrentUser() user: AuthUser) {
-    return this.service.findPosts(user.userId);
+  @ApiOperation({ summary: '글 등록 이력 조회 (페이지네이션)' })
+  findPosts(
+    @CurrentUser() user: AuthUser,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const pageNum = Math.max(1, parseInt(page ?? '', 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit ?? '', 10) || 30));
+    return this.service.findPosts(user.userId, pageNum, limitNum);
   }
 
   @Post(':id/save-cookies')
