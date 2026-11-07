@@ -36,11 +36,17 @@ RUN npx playwright-core install --with-deps chromium
 # CloakBrowser 스텔스 Chromium 바이너리 다운로드
 RUN npx cloakbrowser install
 
+# init 프로세스(tini) — Node가 PID 1이면 Chromium 고아/좀비 프로세스를 수거하지 못해
+# 장기 가동 시 프로세스 테이블 고갈(fork EAGAIN)로 브라우저 실행이 전부 실패한다
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
 
 # Expose port
 EXPOSE 3000
 
-# Start the application
+# Start the application (tini가 PID 1로서 좀비 프로세스 수거)
+ENTRYPOINT ["tini", "--"]
 CMD ["node", "dist/main"]

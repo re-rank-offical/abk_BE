@@ -15,6 +15,8 @@ import {
   chromium,
 } from 'playwright-core';
 
+import { readdirSync } from 'fs';
+
 import { resolveChromiumPath } from '../common/utils/chromium-path.util';
 import {
   AuthoritySite,
@@ -409,6 +411,8 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     title: string,
     body: string,
   ): Promise<void> {
+    this.logProcessCount();
+
     // 타입별 4그룹 분류
     const wpApiSites = sites.filter(
       (s) => s.siteType === SiteType.WORDPRESS && s.wordpressApiUrl,
@@ -589,6 +593,23 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     return post;
   }
 
+  /** 컨테이너 프로세스 수 로깅 — 좀비 누적(fork EAGAIN) 조기 감지용, Linux 전용 */
+  private logProcessCount(): void {
+    try {
+      const count = readdirSync('/proc').filter((name) =>
+        /^\d+$/.test(name),
+      ).length;
+      this.logger.log(`현재 컨테이너 프로세스 수: ${count}`);
+      if (count > 1000) {
+        this.logger.warn(
+          `프로세스 수 ${count}개 — 좀비 프로세스 누적 가능성, 컨테이너 재시작 검토 필요`,
+        );
+      }
+    } catch {
+      /* Linux 외 환경에서는 무시 */
+    }
+  }
+
   private async withTimeout<T>(
     promise: Promise<T>,
     timeoutMs: number,
@@ -642,14 +663,26 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
         ? `${wpApiBase}/posts`
         : `${wpApiBase}/wp/v2/posts`;
 
-      const response = await fetch(postsUrl, {
+      const requestInit = {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Basic ${auth}`,
         },
         body: JSON.stringify({ title, content: body, status: 'publish' }),
-      });
+      };
+
+      let response: Awaited<ReturnType<typeof fetch>>;
+      try {
+        response = await fetch(postsUrl, requestInit);
+      } catch (err) {
+        // 네트워크 오류(fetch failed)는 상대 사이트 순단일 수 있어 30초 후 1회 재시도
+        this.logger.warn(
+          `WordPress API 요청 실패, 30초 후 재시도 [${site.siteName}]: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 30000));
+        response = await fetch(postsUrl, requestInit);
+      }
 
       if (!response.ok) {
         const errText = await response.text();
@@ -662,9 +695,15 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       const data = await response.json();
       return { success: true, publishedUrl: data.link };
     } catch (err) {
+      // undici의 'fetch failed'는 원인이 err.cause에 숨어 있어 함께 기록
+      const rawCause =
+        err instanceof Error
+          ? (err as Error & { cause?: unknown }).cause
+          : undefined;
+      const cause = rawCause ? ` (cause: ${String(rawCause)})` : '';
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: `${err instanceof Error ? err.message : String(err)}${cause}`,
       };
     }
   }
@@ -1978,6 +2017,27 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       this.logger.warn('PROXY_* 환경변수 미설정 – 프록시 없이 실행');
     }
 
+    // 프로세스 테이블 포화(fork EAGAIN) 같은 일시적 오류는 백오프 후 재시도
+    const retryDelaysMs = [5000, 15000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.launchBrowserOnce(launchOptions);
+      } catch (err) {
+        if (attempt >= retryDelaysMs.length) {
+          throw err;
+        }
+        const delayMs = retryDelaysMs[attempt];
+        this.logger.warn(
+          `브라우저 실행 실패, ${delayMs / 1000}초 후 재시도 (${attempt + 1}/${retryDelaysMs.length}): ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+
+  private async launchBrowserOnce(
+    launchOptions: Record<string, unknown>,
+  ): Promise<Browser> {
     try {
       const { launch } = await (Function(
         'return import("cloakbrowser")',
