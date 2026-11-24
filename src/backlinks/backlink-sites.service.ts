@@ -3410,7 +3410,8 @@ ANSWER: [정확히 ${blankCount}글자만]`,
             message: '블로그 URL에서 블로그 ID를 파싱할 수 없습니다.',
           };
         }
-        verifyUrl = `https://admin.blog.naver.com/${blogId}`;
+        // 로그인 필요 페이지(글쓰기)로 접근 → 비로그인 시 nid.naver.com으로 리다이렉트된다.
+        verifyUrl = `https://blog.naver.com/${blogId}?Redirect=Write&`;
       } else {
         const blogName =
           (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] ||
@@ -3439,10 +3440,17 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       await context.addCookies(cookies);
 
       const page = await context.newPage();
-      await page.goto(verifyUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
-      });
+      try {
+        await page.goto(verifyUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 20000,
+        });
+      } catch (navErr) {
+        // 리다이렉트로 인한 네비게이션 중단은 무시하고 현재 URL로 판단
+        this.logger.warn(
+          `세션 검증 네비게이션 경고: ${navErr instanceof Error ? navErr.message.substring(0, 120) : String(navErr)}`,
+        );
+      }
       await page.waitForTimeout(3000);
 
       const currentUrl = page.url();
