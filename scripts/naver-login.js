@@ -64,34 +64,29 @@ async function main() {
     process.exit(1);
   }
 
-  let site;
-  if (arg) {
-    site = rows.find(
-      (r) =>
-        (r.siteUrl || '').toLowerCase().includes(arg) ||
-        (r.siteName || '').toLowerCase().includes(arg),
-    );
-    if (!site) {
-      console.error(`"${arg}"에 해당하는 네이버 사이트를 찾지 못했습니다.`);
-      console.error(
-        '사이트 목록:\n' +
-          rows.map((r) => `  - ${r.siteName} (${r.siteUrl})`).join('\n'),
-      );
-      await db.end();
-      process.exit(1);
-    }
-  } else if (rows.length === 1) {
-    site = rows[0];
-  } else {
-    console.error('네이버 사이트가 여러 개입니다. 블로그 ID를 지정하세요:');
+  // 쿠키는 네이버 계정 단위라 같은 계정의 여러 사이트에 공용으로 저장한다.
+  // arg가 있으면 일치하는 사이트들만, 없으면 모든 네이버 사이트에 저장.
+  const targets = arg
+    ? rows.filter(
+        (r) =>
+          (r.siteUrl || '').toLowerCase().includes(arg) ||
+          (r.siteName || '').toLowerCase().includes(arg),
+      )
+    : rows;
+
+  if (targets.length === 0) {
+    console.error(`"${arg}"에 해당하는 네이버 사이트를 찾지 못했습니다.`);
     console.error(
-      rows.map((r) => `  npm run naver-login -- ${r.siteUrl}`).join('\n'),
+      '사이트 목록:\n' +
+        rows.map((r) => `  - ${r.siteName} (${r.siteUrl})`).join('\n'),
     );
     await db.end();
     process.exit(1);
   }
 
-  console.log(`\n대상 사이트: ${site.siteName} (${site.siteUrl})`);
+  console.log(
+    `\n대상 사이트(${targets.length}개): ${targets.map((t) => t.siteName).join(', ')}`,
+  );
   console.log('크롬 창을 엽니다. 네이버에 직접 로그인해 주세요...\n');
 
   const browser = await launchBrowser();
@@ -147,13 +142,18 @@ async function main() {
         sameSite: c.sameSite || 'Lax',
       }));
 
-    await db.query(
-      `UPDATE authority_sites SET "sessionCookies" = $1, "updatedAt" = now() WHERE id = $2`,
-      [JSON.stringify(keep), site.id],
-    );
+    const cookieJson = JSON.stringify(keep);
+    for (const t of targets) {
+      await db.query(
+        `UPDATE authority_sites SET "sessionCookies" = $1, "updatedAt" = now() WHERE id = $2`,
+        [cookieJson, t.id],
+      );
+    }
     saved = true;
     console.log(
-      `\n✅ 로그인 감지! 쿠키 ${keep.length}개를 "${site.siteName}"에 저장했습니다.`,
+      `\n✅ 로그인 감지! 쿠키 ${keep.length}개를 ${targets.length}개 사이트(${targets
+        .map((t) => t.siteName)
+        .join(', ')})에 저장했습니다.`,
     );
     console.log('이제 자동발행에서 네이버로 바로 발행할 수 있습니다.');
     break;
