@@ -180,12 +180,15 @@ async function publishPost({ arg = '', title = '', body = '', timeoutMs = 8 * 60
   let browser = null;
   try {
     const { rows } = await db.query(
-      `SELECT id, "siteName", "siteUrl", "sessionCookies" FROM authority_sites WHERE "siteType" = 'NAVER' ORDER BY "updatedAt" DESC`,
+      `SELECT id, "siteName", "siteUrl", "sessionCookies", "userId" FROM authority_sites WHERE "siteType" = 'NAVER' ORDER BY "updatedAt" DESC`,
     );
     if (rows.length === 0) return { success: false, message: '등록된 네이버 사이트가 없습니다.' };
-    const site = needle
-      ? rows.find((r) => (r.siteUrl || '').toLowerCase().includes(needle) || (r.siteName || '').toLowerCase().includes(needle))
-      : rows[0];
+    // arg가 사이트 id면 정확히, 아니면 URL/이름 부분일치
+    const site =
+      rows.find((r) => r.id === arg) ||
+      (needle
+        ? rows.find((r) => (r.siteUrl || '').toLowerCase().includes(needle) || (r.siteName || '').toLowerCase().includes(needle))
+        : rows[0]);
     if (!site) return { success: false, message: `"${arg}"에 해당하는 네이버 사이트를 찾지 못했습니다.` };
 
     const blogId = (site.siteUrl.match(/blog\.naver\.com\/([A-Za-z0-9_-]+)/) || [])[1];
@@ -281,6 +284,17 @@ async function publishPost({ arg = '', title = '', body = '', timeoutMs = 8 * 60
       }
     }
     if (!publishedUrl) return { success: false, message: '발행 확정 후에도 글쓰기 페이지에 머물러 있습니다.' };
+
+    // 등록 이력(backlink_posts)에 성공 기록 남기기
+    try {
+      await db.query(
+        `INSERT INTO backlink_posts (id, "authoritySiteId", title, body, status, "publishedUrl", "userId", "createdAt")
+         VALUES (gen_random_uuid(), $1, $2, $3, 'SUCCESS', $4, $5, now())`,
+        [site.id, title, body, publishedUrl, site.userId || null],
+      );
+    } catch (e) {
+      onStatus(`이력 기록 실패(발행은 성공): ${e.message || e}`);
+    }
 
     await page.waitForTimeout(2000); // 사용자가 결과 화면을 볼 시간
     onStatus(`발행 완료: ${publishedUrl}`);
