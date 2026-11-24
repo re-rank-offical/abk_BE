@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   ServiceUnavailableException,
   OnApplicationBootstrap,
 } from '@nestjs/common';
@@ -43,6 +44,10 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
   private readonly processingStartedMarker = 'PROCESSING_STARTED_AT=';
   private readonly activePostIds = new Set<string>();
   private publishMutex = Promise.resolve(); // 글 단위 발행 직렬화
+
+  // 게스트(체험) 계정: 총 발행 건수를 제한한다.
+  private readonly guestEmails = ['guest@example.com', 'gest@example.com'];
+  private readonly guestPublishLimit = 10;
 
   constructor(
     @InjectRepository(AuthoritySite)
@@ -351,6 +356,7 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     siteIds: string[],
     title: string,
     body: string,
+    userEmail?: string,
   ): Promise<BacklinkPost[]> {
     const sites = await this.siteRepository.find({
       where: { id: In(siteIds), userId },
@@ -358,6 +364,24 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
 
     if (sites.length === 0) {
       throw new NotFoundException('선택된 사이트를 찾을 수 없습니다.');
+    }
+
+    // 게스트(체험) 계정은 총 발행 건수를 제한한다.
+    if (userEmail && this.guestEmails.includes(userEmail.toLowerCase())) {
+      const alreadyPublished = await this.postRepository.count({
+        where: { userId },
+      });
+      const remaining = this.guestPublishLimit - alreadyPublished;
+      if (remaining <= 0) {
+        throw new ForbiddenException(
+          `체험 계정은 최대 ${this.guestPublishLimit}건까지만 발행할 수 있습니다. (현재 ${alreadyPublished}건)`,
+        );
+      }
+      if (sites.length > remaining) {
+        throw new ForbiddenException(
+          `체험 계정은 최대 ${this.guestPublishLimit}건까지만 발행할 수 있습니다. 남은 발행 가능 건수: ${remaining}건 (요청: ${sites.length}건)`,
+        );
+      }
     }
 
     // 1) 모든 사이트에 대해 PENDING 레코드를 미리 생성

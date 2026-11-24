@@ -68,6 +68,7 @@ export class BacklinkSitesController {
       dto.siteIds,
       dto.title,
       dto.body,
+      user.email,
     );
   }
 
