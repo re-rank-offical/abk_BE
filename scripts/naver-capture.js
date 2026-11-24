@@ -241,11 +241,20 @@ async function publishPost({ arg = '', title = '', body = '', timeoutMs = 8 * 60
     if (!frameEl) return { success: false, message: '에디터(iframe)를 찾을 수 없습니다.' };
     const frame = await frameEl.contentFrame();
 
-    // 임시저장 복구 팝업: 취소(새 글)
-    try {
-      const c = await frame.$('.se-popup-button-cancel');
-      if (c && (await c.isVisible())) { await c.click(); await page.waitForTimeout(800); }
-    } catch (_) {}
+    // 임시저장 복구 팝업: 취소(새 글) — 여러 번 뜰 수 있어 반복 처리
+    for (let i = 0; i < 3; i++) {
+      try {
+        const dismissed = await frame.evaluate(() => {
+          const c = document.querySelector('.se-popup-button-cancel');
+          if (c && c.offsetParent !== null) { c.click(); return true; }
+          return false;
+        });
+        if (!dismissed) break;
+        await page.waitForTimeout(800);
+      } catch (_) {
+        break;
+      }
+    }
 
     onStatus('제목을 입력합니다...');
     const titleEl = await frame.waitForSelector('.se-section-documentTitle .se-text-paragraph', { state: 'visible', timeout: 30000 });
@@ -267,20 +276,50 @@ async function publishPost({ arg = '', title = '', body = '', timeoutMs = 8 * 60
     await page.waitForTimeout(800);
 
     onStatus('발행합니다...');
-    // 상단 발행 → 설정 레이어의 확정 발행 (tpb*i.publish)
-    await frame.click('button[data-click-area="tpb.publish"], button[class*="publish_btn"]');
-    await frame.waitForSelector('button[data-click-area="tpb*i.publish"]', { state: 'visible', timeout: 12000 });
-    await page.waitForTimeout(800);
-    await frame.click('button[data-click-area="tpb*i.publish"]');
+    // 1) 발행 설정 레이어 열기 (JS 클릭, 최대 3회 재시도 — 오버레이/타이밍 대비)
+    let layerOpen = false;
+    for (let a = 0; a < 3 && !layerOpen; a++) {
+      await frame.evaluate(() => {
+        const b = document.querySelector('button[data-click-area="tpb.publish"], button[class*="publish_btn"]');
+        if (b) b.click();
+      });
+      try {
+        await frame.waitForSelector('button[data-click-area="tpb*i.publish"]', { state: 'visible', timeout: 6000 });
+        layerOpen = true;
+      } catch (_) {
+        await page.waitForTimeout(1500);
+      }
+    }
+    if (!layerOpen) return { success: false, message: '발행 설정 레이어가 열리지 않았습니다.' };
+    await page.waitForTimeout(1000);
 
-    // 발행 완료: 글 보기 URL로 이동 대기
+    // 2) 확정 발행: 가리는 오버레이(도움말 툴팁 등)의 pointer-events를 꺼서
+    //    "정상(신뢰) 클릭"이 버튼에 도달하게 한다. (force/JS 클릭은 네이버가 발행을 트리거하지 않음)
     let publishedUrl = null;
-    for (let i = 0; i < 20; i++) {
-      await page.waitForTimeout(1000);
-      const u = page.url();
-      if (new RegExp(`blog\\.naver\\.com/${blogId}/\\d+`).test(u) || (!u.includes('Write') && !u.includes('PostWriteForm'))) {
-        publishedUrl = u;
-        break;
+    for (let a = 0; a < 3 && !publishedUrl; a++) {
+      await frame
+        .evaluate(() => {
+          document
+            .querySelectorAll(
+              '.se-help-panel, [class*="se-help"], [class*="help_"], [class*="tooltip"], [class*="guide_"], .se-popup-dim',
+            )
+            .forEach((el) => {
+              el.style.pointerEvents = 'none';
+            });
+        })
+        .catch(() => {});
+      try {
+        await frame.click('button[data-click-area="tpb*i.publish"]', { timeout: 7000 });
+      } catch (_) {
+        /* 재시도 */
+      }
+      for (let i = 0; i < 10; i++) {
+        await page.waitForTimeout(1000);
+        const u = page.url();
+        if (new RegExp(`blog\\.naver\\.com/${blogId}/\\d+`).test(u) || (!u.includes('Write') && !u.includes('PostWriteForm'))) {
+          publishedUrl = u;
+          break;
+        }
       }
     }
     if (!publishedUrl) return { success: false, message: '발행 확정 후에도 글쓰기 페이지에 머물러 있습니다.' };
