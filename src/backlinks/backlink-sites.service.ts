@@ -1727,6 +1727,92 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
 
   // ── 네이버 블로그 Playwright 글 등록 ──
 
+  /** 프록시 자격증명/터널 관련 접속 오류인지 판별 */
+  private isProxyNavigationError(message: string): boolean {
+    return (
+      message.includes('ERR_INVALID_AUTH_CREDENTIALS') ||
+      message.includes('ERR_PROXY_CONNECTION_FAILED') ||
+      message.includes('ERR_TUNNEL_CONNECTION_FAILED') ||
+      message.includes('ERR_NO_SUPPORTED_PROXIES')
+    );
+  }
+
+  /**
+   * 네이버용 브라우저 세션을 연다.
+   * 1차: residential proxy(사이트별 고정 IP) → 2차: 프록시 없이.
+   * 배정된 프록시 호스트가 죽어 접속이 실패하면 프록시 없이 폴백한다.
+   */
+  private async openNaverBrowser(site: AuthoritySite): Promise<
+    | { ok: true; browser: Browser; context: BrowserContext; page: Page }
+    | { ok: false; error: string }
+  > {
+    const attempts: Array<{ useProxy: boolean }> = [
+      { useProxy: true },
+      { useProxy: false },
+    ];
+
+    let lastError = '';
+    for (const attempt of attempts) {
+      let browser: Browser | null = null;
+      let context: BrowserContext | null = null;
+      try {
+        browser = await this.createBrowser(
+          attempt.useProxy
+            ? { useResidentialProxy: true, siteKey: site.id }
+            : undefined,
+        );
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          locale: 'ko-KR',
+          timezoneId: 'Asia/Seoul',
+          ignoreHTTPSErrors: true,
+        });
+
+        // 세션 쿠키 복원
+        if (site.sessionCookies) {
+          try {
+            await context.addCookies(JSON.parse(site.sessionCookies));
+          } catch {
+            this.logger.warn('네이버 세션 쿠키 파싱 실패');
+          }
+        }
+
+        const page = await context.newPage();
+        await page.goto('https://www.naver.com/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 20000,
+        });
+
+        return { ok: true, browser, context, page };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        try {
+          await context?.close();
+        } catch {
+          /* ignore */
+        }
+        try {
+          await browser?.close();
+        } catch {
+          /* ignore */
+        }
+
+        if (attempt.useProxy && this.isProxyNavigationError(lastError)) {
+          this.logger.warn(
+            `네이버 프록시 접속 실패, 프록시 없이 재시도: ${lastError.substring(0, 120)}`,
+          );
+          continue;
+        }
+        break;
+      }
+    }
+
+    return {
+      ok: false,
+      error: `네이버 브라우저 세션을 열 수 없습니다: ${lastError}`,
+    };
+  }
+
   /**
    * 네이버 블로그에 Playwright 브라우저 제어로 글을 발행한다.
    * 티스토리와 동일하게 한국 residential proxy + 사이트별 고정 IP + 세션 쿠키를 사용한다.
@@ -1755,28 +1841,15 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
         };
       }
 
-      browser = await this.createBrowser({
-        useResidentialProxy: true,
-        siteKey: site.id,
-      });
-      context = await browser.newContext({
-        viewport: { width: 1280, height: 900 },
-        locale: 'ko-KR',
-        timezoneId: 'Asia/Seoul',
-        ignoreHTTPSErrors: true,
-      });
-
-      // 1. 세션 쿠키 복원
-      if (site.sessionCookies) {
-        try {
-          const cookies = JSON.parse(site.sessionCookies);
-          await context.addCookies(cookies);
-        } catch {
-          this.logger.warn('네이버 세션 쿠키 파싱 실패');
-        }
+      // 브라우저 세션 오픈: residential proxy 우선, 프록시 접속 실패 시 프록시 없이 폴백
+      // (사이트별 고정 프록시 호스트가 죽으면 ERR_INVALID_AUTH_CREDENTIALS가 반복되므로)
+      const opened = await this.openNaverBrowser(site);
+      if (!opened.ok) {
+        return { success: false, error: opened.error };
       }
-
-      const page = await context.newPage();
+      browser = opened.browser;
+      context = opened.context;
+      const page = opened.page;
 
       // 다이얼로그(임시저장 복구 등) 자동 수락
       page.on('dialog', async (dialog) => {
@@ -1788,11 +1861,7 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
         }
       });
 
-      // 2. 로그인 상태 확인 (네이버 메인 방문)
-      await page.goto('https://www.naver.com/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
-      });
+      // 로그인 상태 확인 (openNaverBrowser에서 www.naver.com 접속 완료)
       await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
 
       const isLoggedIn = await page.evaluate(() => {
@@ -2045,32 +2114,111 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     return false;
   }
 
-  /** 네이버 에디터 본문 영역에 본문을 입력한다. HTML 태그는 제거하고 텍스트/줄바꿈 기준으로 입력한다. */
+  /**
+   * 네이버 스마트에디터 ONE 본문 영역에 글을 작성한다.
+   * 1차: HTML paste 이벤트를 주입해 에디터가 제목/문단/목록 컴포넌트로 변환하도록 유도(서식 유지).
+   * 2차(폴백): 변환이 안 되면 태그를 제거한 평문을 문단 단위로 타이핑(깨짐 없음).
+   */
   private async fillNaverBody(frame: Frame, body: string): Promise<boolean> {
-    // SmartEditor ONE은 HTML 직접 주입이 어려우므로 태그를 제거한 텍스트를 타이핑한다.
-    const plainText = this.htmlToPlainText(body);
     const page = frame.page();
+    const html = this.sanitizeNaverHtml(body);
 
     const bodySelectors = [
       '.se-component-content .se-text-paragraph',
       '.se-section-text .se-text-paragraph',
       '.se-component.se-text .se-text-paragraph',
+      '.se-content [contenteditable="true"]',
+      '.se-container [contenteditable="true"]',
     ];
 
+    let usedSel = '';
     for (const sel of bodySelectors) {
       const el = await frame.$(sel);
       if (el) {
+        usedSel = sel;
         await el.click();
-        await page.waitForTimeout(500);
-        const lines = plainText.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i]) await page.keyboard.type(lines[i], { delay: 10 });
-          if (i < lines.length - 1) await page.keyboard.press('Enter');
-        }
-        return true;
+        break;
       }
     }
-    return false;
+    if (!usedSel) return false;
+
+    await page.waitForTimeout(500);
+
+    const beforeLen = await frame.evaluate(
+      () =>
+        (
+          document.querySelector('.se-content, .se-container')?.textContent ||
+          ''
+        ).length,
+    );
+
+    // 1차: 스마트에디터 ONE paste 핸들러로 HTML 전달 (서식 유지)
+    const pasted = await frame.evaluate(
+      ({ sel, html }: { sel: string; html: string }) => {
+        const target = (document.querySelector(sel) ||
+          document.querySelector(
+            '[contenteditable="true"]',
+          )) as HTMLElement | null;
+        if (!target) return false;
+        target.focus();
+        try {
+          const dt = new DataTransfer();
+          dt.setData('text/html', html);
+          dt.setData('text/plain', html.replace(/<[^>]+>/g, ''));
+          const evt = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt,
+          });
+          target.dispatchEvent(evt);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { sel: usedSel, html },
+    );
+
+    await page.waitForTimeout(1500);
+
+    const afterLen = await frame.evaluate(
+      () =>
+        (
+          document.querySelector('.se-content, .se-container')?.textContent ||
+          ''
+        ).length,
+    );
+
+    // paste가 실제로 내용을 넣었으면 성공으로 간주
+    if (pasted && afterLen - beforeLen > 20) {
+      this.logger.log('네이버 본문 HTML paste 성공 (서식 유지)');
+      return true;
+    }
+
+    // 2차 폴백: 평문 문단 단위 타이핑
+    this.logger.log('네이버 본문 paste 실패 – 평문 타이핑으로 폴백');
+    const target = await frame.$(usedSel);
+    if (!target) return false;
+    await target.click();
+    await page.waitForTimeout(300);
+    const lines = this.htmlToPlainText(body).split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i]) await page.keyboard.type(lines[i], { delay: 8 });
+      if (i < lines.length - 1) await page.keyboard.press('Enter');
+    }
+    return true;
+  }
+
+  /** AI가 생성한 본문 HTML에서 스마트에디터가 받을 수 있는 안전한 태그만 남긴다. */
+  private sanitizeNaverHtml(html: string): string {
+    const allowed = /^(h2|h3|p|ul|ol|li|strong|b|em|br)$/i;
+    return html
+      .replace(/<\/?([a-z0-9]+)(\s[^>]*)?>/gi, (match, tag) =>
+        allowed.test(tag) ? match.replace(/\s[^>]*>/, '>') : '',
+      )
+      .replace(/```[a-z]*\n?/gi, '')
+      .replace(/```/g, '')
+      .trim();
   }
 
   /** HTML 문자열을 네이버 에디터 입력용 평문으로 변환한다. */
@@ -3425,32 +3573,68 @@ ANSWER: [정확히 ${blankCount}글자만]`,
         verifyUrl = `https://${blogName}.tistory.com/manage/`;
       }
 
-      browser = await this.createBrowser({
-        useResidentialProxy: true,
-        siteKey: site.id,
-      });
-      context = await browser.newContext({
-        viewport: { width: 1280, height: 900 },
-        locale: 'ko-KR',
-        timezoneId: 'Asia/Seoul',
-        ignoreHTTPSErrors: true,
-      });
+      // 네이버는 프록시 호스트가 죽으면 프록시 없이 폴백, 티스토리는 프록시 유지
+      const proxyAttempts = isNaver ? [true, false] : [true];
+      let page: Page | null = null;
 
-      const cookies = JSON.parse(site.sessionCookies);
-      await context.addCookies(cookies);
-
-      const page = await context.newPage();
-      try {
-        await page.goto(verifyUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 20000,
-        });
-      } catch (navErr) {
-        // 리다이렉트로 인한 네비게이션 중단은 무시하고 현재 URL로 판단
-        this.logger.warn(
-          `세션 검증 네비게이션 경고: ${navErr instanceof Error ? navErr.message.substring(0, 120) : String(navErr)}`,
+      for (let i = 0; i < proxyAttempts.length; i++) {
+        const useProxy = proxyAttempts[i];
+        browser = await this.createBrowser(
+          useProxy ? { useResidentialProxy: true, siteKey: site.id } : undefined,
         );
+        context = await browser.newContext({
+          viewport: { width: 1280, height: 900 },
+          locale: 'ko-KR',
+          timezoneId: 'Asia/Seoul',
+          ignoreHTTPSErrors: true,
+        });
+        await context.addCookies(JSON.parse(site.sessionCookies));
+        page = await context.newPage();
+
+        try {
+          await page.goto(verifyUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 20000,
+          });
+          break; // 접속 성공
+        } catch (navErr) {
+          const msg =
+            navErr instanceof Error ? navErr.message : String(navErr);
+          if (this.isProxyNavigationError(msg)) {
+            if (i < proxyAttempts.length - 1) {
+              this.logger.warn(
+                `세션 검증 프록시 접속 실패, 프록시 없이 재시도: ${msg.substring(0, 120)}`,
+              );
+              try {
+                await context.close();
+              } catch {
+                /* ignore */
+              }
+              try {
+                await browser.close();
+              } catch {
+                /* ignore */
+              }
+              page = null;
+              continue;
+            }
+            return {
+              valid: false,
+              message: `프록시 접속에 실패해 세션을 검증할 수 없습니다. (${msg.substring(0, 120)})`,
+            };
+          }
+          // 리다이렉트 등 비프록시 오류: 현재 URL로 판단 진행
+          this.logger.warn(
+            `세션 검증 네비게이션 경고: ${msg.substring(0, 120)}`,
+          );
+          break;
+        }
       }
+
+      if (!page) {
+        return { valid: false, message: '세션 검증 페이지를 열 수 없습니다.' };
+      }
+
       await page.waitForTimeout(3000);
 
       const currentUrl = page.url();
@@ -3470,7 +3654,7 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       }
 
       // 쿠키 갱신 (방문으로 세션 연장됨)
-      const freshCookies = await context.cookies();
+      const freshCookies = await context!.cookies();
       await this.siteRepository.update(site.id, {
         sessionCookies: JSON.stringify(freshCookies),
       });
