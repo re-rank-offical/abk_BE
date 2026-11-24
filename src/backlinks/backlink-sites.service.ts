@@ -1861,50 +1861,20 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
         }
       });
 
-      // 로그인 상태 확인 (openNaverBrowser에서 www.naver.com 접속 완료)
-      await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
-
-      const isLoggedIn = await page.evaluate(() => {
-        // 로그인 시 상단에 로그아웃 버튼/MY 영역이 노출됨
-        return (
-          document.querySelector('.MyView-module__link_logout___bzdQ5') !==
-            null ||
-          document.querySelector('a[href*="nid.naver.com/nidlogin.logout"]') !==
-            null ||
-          document.cookie.includes('NID_AUT')
-        );
-      });
-
-      // 3. 로그인 필요 시 ID/PW 로그인 시도
-      if (!isLoggedIn) {
-        this.logger.log('네이버 로그인 필요 – ID/PW 로그인 시도');
-        if (!site.loginUsername || !site.loginPassword) {
-          return {
-            success: false,
-            error:
-              '네이버 세션이 없고 로그인 정보도 설정되지 않았습니다. 네이버 아이디/비밀번호를 입력하거나 수동으로 세션 쿠키를 저장해주세요.',
-          };
-        }
-
-        const loginResult = await this.loginToNaver(
-          page,
-          site.loginUsername,
-          site.loginPassword,
-        );
-
-        if (!loginResult.success) {
-          return { success: false, error: loginResult.error };
-        }
-
-        // 로그인 후 쿠키 저장
-        const cookies = await context.cookies();
-        await this.siteRepository.update(site.id, {
-          sessionCookies: JSON.stringify(cookies),
-        });
-        this.logger.log('네이버 로그인 성공 – 쿠키 저장 완료');
+      // 세션 확인: 저장된 쿠키만 사용 (백그라운드 자동 로그인은 네이버 보안정책상 하지 않음)
+      // NID_AUT는 httpOnly라 document.cookie로는 안 보이므로 context.cookies로 확인
+      await page.waitForTimeout(1000 + Math.floor(Math.random() * 1000));
+      const naverCookies = await context.cookies('https://www.naver.com');
+      const hasAuthCookie = naverCookies.some((c) => c.name === 'NID_AUT');
+      if (!hasAuthCookie) {
+        return {
+          success: false,
+          error:
+            '네이버 세션이 없습니다. "사이트 관리 → 해당 네이버 사이트 → 수동 인증"에서 브라우저로 직접 네이버에 로그인한 뒤 쿠키(NID_AUT, NID_SES)를 저장해주세요. (서버 자동 로그인은 네이버 캡차/기기인증 정책상 사용하지 않습니다)',
+        };
       }
 
-      // 4. 글쓰기 페이지 이동 (SmartEditor ONE)
+      // 글쓰기 페이지 이동 (SmartEditor ONE)
       const writeUrl =
         site.writeUrl ||
         `https://blog.naver.com/${blogId}?Redirect=Write&`;
@@ -1923,12 +1893,13 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       }
       await page.waitForTimeout(3000);
 
-      // 로그인 페이지로 튕긴 경우
+      // 로그인 페이지로 튕긴 경우 = 저장된 쿠키가 만료됨
       const curUrl = page.url();
       if (curUrl.includes('nid.naver.com')) {
         return {
           success: false,
-          error: `로그인 페이지로 리다이렉트되었습니다. 세션이 만료되었을 수 있습니다. (URL: ${curUrl})`,
+          error:
+            '네이버 세션이 만료되었습니다. "사이트 관리 → 해당 네이버 사이트 → 수동 인증"에서 브라우저로 직접 로그인한 뒤 쿠키를 다시 저장해주세요.',
         };
       }
 
@@ -2235,86 +2206,6 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       .replace(/&quot;/gi, '"')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
-  }
-
-  /**
-   * 네이버 ID/PW 로그인을 시도한다.
-   * 캡차·2단계 인증·신규 기기 등록이 걸리면 자동화로 통과할 수 없으므로 실패 사유를 반환한다.
-   */
-  private async loginToNaver(
-    page: Page,
-    username: string,
-    password: string,
-  ): Promise<{ success: boolean; error?: string }> {
-    try {
-      await page.goto('https://nid.naver.com/nidlogin.login', {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
-      });
-      await page.waitForTimeout(1500);
-
-      // 자동 입력 탐지 우회: 클립보드 붙여넣기 대신 타이핑
-      const idInput = await page.$('#id');
-      const pwInput = await page.$('#pw');
-      if (!idInput || !pwInput) {
-        return {
-          success: false,
-          error: '네이버 로그인 폼(아이디/비밀번호 입력란)을 찾을 수 없습니다.',
-        };
-      }
-
-      await idInput.click();
-      await page.keyboard.type(username, { delay: 50 });
-      await page.waitForTimeout(500);
-      await pwInput.click();
-      await page.keyboard.type(password, { delay: 50 });
-      await page.waitForTimeout(500);
-
-      const loginBtn = await page.$('#log\\.login, button[type="submit"]');
-      if (loginBtn) {
-        await loginBtn.click();
-      } else {
-        await page.keyboard.press('Enter');
-      }
-      await page.waitForTimeout(4000);
-
-      const afterUrl = page.url();
-
-      // 캡차 또는 기기 등록 / 2단계 인증 감지
-      const blocked = await page.evaluate(() => {
-        const bodyText = document.body?.innerText || '';
-        return (
-          document.querySelector('#captcha, .captcha, #ncaptcha') !== null ||
-          bodyText.includes('자동입력 방지') ||
-          bodyText.includes('새로운 기기') ||
-          bodyText.includes('2단계 인증') ||
-          bodyText.includes('기기 등록')
-        );
-      });
-
-      if (blocked) {
-        return {
-          success: false,
-          error:
-            '네이버 로그인이 캡차 또는 기기 등록/2단계 인증에 막혔습니다. 브라우저에서 직접 로그인 후 세션 쿠키(NID_AUT, NID_SES)를 수동으로 저장해주세요.',
-        };
-      }
-
-      if (afterUrl.includes('nid.naver.com/nidlogin.login')) {
-        return {
-          success: false,
-          error:
-            '네이버 로그인에 실패했습니다. 아이디/비밀번호를 확인하거나 세션 쿠키를 수동으로 저장해주세요.',
-        };
-      }
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: `네이버 로그인 중 오류: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
   }
 
   // ── 유틸리티 ──
