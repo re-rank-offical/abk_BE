@@ -17,6 +17,7 @@ import { BacklinkSitesService } from './backlink-sites.service';
 import { CreateAuthoritySiteDto } from './dto/create-authority-site.dto';
 import { UpdateAuthoritySiteDto } from './dto/update-authority-site.dto';
 import { PublishToSitesDto } from './dto/publish-to-sites.dto';
+import { GenerateContentDto } from './dto/generate-content.dto';
 
 interface AuthUser {
   userId: string;
@@ -68,6 +69,12 @@ export class BacklinkSitesController {
       dto.title,
       dto.body,
     );
+  }
+
+  @Post('generate-content')
+  @ApiOperation({ summary: 'AI로 블로그 본문 생성' })
+  generateContent(@Body() dto: GenerateContentDto) {
+    return this.service.generateContent(dto);
   }
 
   @Get('posts')

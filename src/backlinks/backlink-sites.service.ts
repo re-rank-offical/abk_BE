@@ -2,6 +2,8 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  BadRequestException,
+  ServiceUnavailableException,
   OnApplicationBootstrap,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
@@ -421,9 +423,12 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       (s) => s.siteType === SiteType.WORDPRESS && !s.wordpressApiUrl,
     );
     const tistorySites = sites.filter((s) => s.siteType === SiteType.TISTORY);
+    const naverSites = sites.filter((s) => s.siteType === SiteType.NAVER);
     const otherSites = sites.filter(
       (s) =>
-        s.siteType !== SiteType.WORDPRESS && s.siteType !== SiteType.TISTORY,
+        s.siteType !== SiteType.WORDPRESS &&
+        s.siteType !== SiteType.TISTORY &&
+        s.siteType !== SiteType.NAVER,
     );
 
     // 1) WordPress REST API – 전부 즉시 병렬 (브라우저 불필요)
@@ -503,6 +508,27 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
           batch.map((site) =>
             this.executeAndUpdatePost(site, postMap.get(site.id)!, title, body),
           ),
+        );
+      }
+    }
+
+    // 5) 네이버 – 1개씩 순차 (브라우저 리소스 제한 + 자동화 탐지 방지)
+    if (naverSites.length > 0) {
+      this.logger.log(`네이버 ${naverSites.length}개 사이트 발행 시작 (순차)`);
+      for (let i = 0; i < naverSites.length; i++) {
+        if (i > 0) {
+          const delay = 10000 + Math.random() * 10000;
+          this.logger.log(
+            `다음 네이버 발행까지 ${Math.round(delay / 1000)}초 대기`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+        const site = naverSites[i];
+        await this.executeAndUpdatePost(
+          site,
+          postMap.get(site.id)!,
+          title,
+          body,
         );
       }
     }
@@ -637,6 +663,9 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     }
     if (site.siteType === SiteType.TISTORY) {
       return this.publishViaTistory(site, title, body);
+    }
+    if (site.siteType === SiteType.NAVER) {
+      return this.publishViaNaver(site, title, body);
     }
     if (site.siteType === SiteType.LINKEDIN) {
       return this.publishViaPlaywright(site, title, body);
@@ -1669,6 +1698,450 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  // ── 네이버 블로그 Playwright 글 등록 ──
+
+  /**
+   * 네이버 블로그에 Playwright 브라우저 제어로 글을 발행한다.
+   * 티스토리와 동일하게 한국 residential proxy + 사이트별 고정 IP + 세션 쿠키를 사용한다.
+   * 네이버는 자동 로그인 차단(캡차/기기등록)이 심하므로 저장된 세션 쿠키를 우선 사용하고,
+   * 쿠키가 없거나 만료된 경우에만 ID/PW 로그인을 시도한다.
+   */
+  private async publishViaNaver(
+    site: AuthoritySite,
+    title: string,
+    body: string,
+  ): Promise<{ success: boolean; publishedUrl?: string; error?: string }> {
+    let browser: Browser | null = null;
+    let context: BrowserContext | null = null;
+
+    try {
+      // 블로그 ID 파싱: https://blog.naver.com/{blogId}
+      const blogId =
+        (site.siteUrl.match(
+          /blog\.naver\.com\/([A-Za-z0-9_-]+)/,
+        ) || [])[1] || '';
+      if (!blogId) {
+        return {
+          success: false,
+          error:
+            '네이버 블로그 URL에서 블로그 ID를 파싱할 수 없습니다. (예: https://blog.naver.com/myid)',
+        };
+      }
+
+      browser = await this.createBrowser({
+        useResidentialProxy: true,
+        siteKey: site.id,
+      });
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        locale: 'ko-KR',
+        timezoneId: 'Asia/Seoul',
+        ignoreHTTPSErrors: true,
+      });
+
+      // 1. 세션 쿠키 복원
+      if (site.sessionCookies) {
+        try {
+          const cookies = JSON.parse(site.sessionCookies);
+          await context.addCookies(cookies);
+        } catch {
+          this.logger.warn('네이버 세션 쿠키 파싱 실패');
+        }
+      }
+
+      const page = await context.newPage();
+
+      // 다이얼로그(임시저장 복구 등) 자동 수락
+      page.on('dialog', async (dialog) => {
+        this.logger.log(`네이버 다이얼로그: ${dialog.type()} - ${dialog.message()}`);
+        try {
+          await dialog.accept();
+        } catch {
+          /* ignore */
+        }
+      });
+
+      // 2. 로그인 상태 확인 (네이버 메인 방문)
+      await page.goto('https://www.naver.com/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      });
+      await page.waitForTimeout(1500 + Math.floor(Math.random() * 1500));
+
+      const isLoggedIn = await page.evaluate(() => {
+        // 로그인 시 상단에 로그아웃 버튼/MY 영역이 노출됨
+        return (
+          document.querySelector('.MyView-module__link_logout___bzdQ5') !==
+            null ||
+          document.querySelector('a[href*="nid.naver.com/nidlogin.logout"]') !==
+            null ||
+          document.cookie.includes('NID_AUT')
+        );
+      });
+
+      // 3. 로그인 필요 시 ID/PW 로그인 시도
+      if (!isLoggedIn) {
+        this.logger.log('네이버 로그인 필요 – ID/PW 로그인 시도');
+        if (!site.loginUsername || !site.loginPassword) {
+          return {
+            success: false,
+            error:
+              '네이버 세션이 없고 로그인 정보도 설정되지 않았습니다. 네이버 아이디/비밀번호를 입력하거나 수동으로 세션 쿠키를 저장해주세요.',
+          };
+        }
+
+        const loginResult = await this.loginToNaver(
+          page,
+          site.loginUsername,
+          site.loginPassword,
+        );
+
+        if (!loginResult.success) {
+          return { success: false, error: loginResult.error };
+        }
+
+        // 로그인 후 쿠키 저장
+        const cookies = await context.cookies();
+        await this.siteRepository.update(site.id, {
+          sessionCookies: JSON.stringify(cookies),
+        });
+        this.logger.log('네이버 로그인 성공 – 쿠키 저장 완료');
+      }
+
+      // 4. 글쓰기 페이지 이동 (SmartEditor ONE)
+      const writeUrl =
+        site.writeUrl ||
+        `https://blog.naver.com/${blogId}?Redirect=Write&`;
+      try {
+        await page.goto(writeUrl, { waitUntil: 'load', timeout: 45000 });
+      } catch (navErr) {
+        this.logger.warn(
+          `네이버 글쓰기 페이지 이동 중 에러 (리다이렉트 가능): ${navErr instanceof Error ? navErr.message.substring(0, 100) : String(navErr)}`,
+        );
+      }
+
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 20000 });
+      } catch {
+        this.logger.warn('네이버 networkidle 대기 타임아웃 – 계속 진행');
+      }
+      await page.waitForTimeout(3000);
+
+      // 로그인 페이지로 튕긴 경우
+      const curUrl = page.url();
+      if (curUrl.includes('nid.naver.com')) {
+        return {
+          success: false,
+          error: `로그인 페이지로 리다이렉트되었습니다. 세션이 만료되었을 수 있습니다. (URL: ${curUrl})`,
+        };
+      }
+
+      // 5. 에디터 iframe 확보 (SmartEditor ONE은 mainFrame iframe 안에서 렌더됨)
+      const editorFrame = await this.getNaverEditorFrame(page);
+      if (!editorFrame) {
+        return {
+          success: false,
+          error:
+            '네이버 글쓰기 에디터(iframe)를 찾을 수 없습니다. 페이지 구조가 변경되었거나 로그인되지 않았을 수 있습니다.',
+        };
+      }
+
+      // 임시저장 복구 팝업 닫기 ("취소" 클릭 → 새 글 작성)
+      try {
+        const cancelBtn = await editorFrame.$(
+          '.se-popup-button-cancel, button.se-popup-button-cancel',
+        );
+        if (cancelBtn) {
+          await cancelBtn.click();
+          await page.waitForTimeout(1000);
+          this.logger.log('네이버 임시저장 복구 팝업 닫음');
+        }
+      } catch {
+        /* 팝업 없으면 무시 */
+      }
+
+      // 6. 제목 입력
+      const titleFilled = await this.fillNaverTitle(editorFrame, title);
+      if (!titleFilled) {
+        return {
+          success: false,
+          error: '네이버 제목 입력 영역을 찾을 수 없습니다.',
+        };
+      }
+      await page.waitForTimeout(1000);
+
+      // 7. 본문 입력
+      const bodyFilled = await this.fillNaverBody(editorFrame, body);
+      if (!bodyFilled) {
+        return {
+          success: false,
+          error: '네이버 본문 입력 영역을 찾을 수 없습니다.',
+        };
+      }
+      await page.waitForTimeout(1000);
+
+      // 8. 발행: 상단 "발행" 버튼 → 발행 레이어의 "발행" 확정 버튼
+      const publishOpened = await editorFrame.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const pub = btns.find(
+          (b) =>
+            (b.className?.includes('publish_btn') ||
+              b.getAttribute('data-click-area') === 'tpb.publish' ||
+              b.textContent?.trim() === '발행') &&
+            (b as HTMLElement).offsetParent !== null,
+        );
+        if (pub) {
+          (pub as HTMLElement).click();
+          return true;
+        }
+        return false;
+      });
+
+      if (!publishOpened) {
+        return {
+          success: false,
+          error: '네이버 "발행" 버튼을 찾을 수 없습니다.',
+        };
+      }
+      await page.waitForTimeout(2000);
+
+      // 발행 레이어의 확정 버튼 클릭
+      const confirmed = await editorFrame.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const confirm = btns.find(
+          (b) =>
+            (b.getAttribute('data-click-area') === 'tpb*i.publish' ||
+              b.className?.includes('confirm_btn') ||
+              b.textContent?.trim() === '발행') &&
+            (b as HTMLElement).offsetParent !== null,
+        );
+        if (confirm) {
+          (confirm as HTMLElement).click();
+          return true;
+        }
+        return false;
+      });
+
+      if (!confirmed) {
+        this.logger.warn(
+          '네이버 발행 확정 버튼을 찾지 못함 – 발행 레이어 없이 바로 발행되었을 수 있음',
+        );
+      }
+
+      // 9. 발행 완료 대기 (글 보기 페이지로 이동)
+      await page.waitForTimeout(5000);
+      const publishedUrl = page.url();
+      this.logger.log(`네이버 발행 후 URL: ${publishedUrl}`);
+
+      // 글쓰기 페이지를 벗어났으면 성공으로 판단
+      if (!publishedUrl.includes('Write') && !publishedUrl.includes('postwrite')) {
+        return { success: true, publishedUrl };
+      }
+
+      return {
+        success: false,
+        error: `발행 후에도 글쓰기 페이지에 머물러 있습니다. 실제 발행이 이루어지지 않았을 수 있습니다. (URL: ${publishedUrl})`,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `네이버 발행 실패 [${site.siteName}] url=${site.siteUrl}: ${msg}`,
+      );
+      return { success: false, error: msg };
+    } finally {
+      try {
+        await context?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await browser?.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /** 네이버 SmartEditor ONE 에디터가 들어있는 iframe(또는 메인 프레임)을 반환한다. */
+  private async getNaverEditorFrame(page: Page): Promise<Frame | null> {
+    // SmartEditor ONE은 mainFrame(name="mainFrame") iframe 안에서 렌더됨
+    try {
+      const iframeEl = await page.$('iframe#mainFrame, iframe[name="mainFrame"]');
+      if (iframeEl) {
+        const frame = await iframeEl.contentFrame();
+        if (frame) {
+          // 에디터 요소가 나타날 때까지 대기
+          try {
+            await frame.waitForSelector(
+              '.se-section-documentTitle, .se-component-content, .se-placeholder',
+              { timeout: 15000 },
+            );
+          } catch {
+            /* 셀렉터 미발견이어도 프레임은 반환 */
+          }
+          return frame;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // iframe이 없으면 메인 페이지에서 직접 에디터를 찾는다 (구조 변경 대비)
+    try {
+      await page.waitForSelector(
+        '.se-section-documentTitle, .se-component-content',
+        { timeout: 10000 },
+      );
+      return page.mainFrame();
+    } catch {
+      return null;
+    }
+  }
+
+  /** 네이버 에디터 제목 영역에 제목을 입력한다. */
+  private async fillNaverTitle(frame: Frame, title: string): Promise<boolean> {
+    const page = frame.page();
+    const titleSelectors = [
+      '.se-section-documentTitle .se-text-paragraph',
+      '.se-documentTitle .se-text-paragraph',
+      '.se-placeholder.__se_placeholder',
+    ];
+    for (const sel of titleSelectors) {
+      const el = await frame.$(sel);
+      if (el) {
+        await el.click();
+        await page.waitForTimeout(300);
+        await page.keyboard.type(title, { delay: 20 });
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 네이버 에디터 본문 영역에 본문을 입력한다. HTML 태그는 제거하고 텍스트/줄바꿈 기준으로 입력한다. */
+  private async fillNaverBody(frame: Frame, body: string): Promise<boolean> {
+    // SmartEditor ONE은 HTML 직접 주입이 어려우므로 태그를 제거한 텍스트를 타이핑한다.
+    const plainText = this.htmlToPlainText(body);
+    const page = frame.page();
+
+    const bodySelectors = [
+      '.se-component-content .se-text-paragraph',
+      '.se-section-text .se-text-paragraph',
+      '.se-component.se-text .se-text-paragraph',
+    ];
+
+    for (const sel of bodySelectors) {
+      const el = await frame.$(sel);
+      if (el) {
+        await el.click();
+        await page.waitForTimeout(500);
+        const lines = plainText.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i]) await page.keyboard.type(lines[i], { delay: 10 });
+          if (i < lines.length - 1) await page.keyboard.press('Enter');
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** HTML 문자열을 네이버 에디터 입력용 평문으로 변환한다. */
+  private htmlToPlainText(html: string): string {
+    return html
+      .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+      .replace(/<\/\s*(p|div|h[1-6]|li)\s*>/gi, '\n')
+      .replace(/<li[^>]*>/gi, '• ')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  /**
+   * 네이버 ID/PW 로그인을 시도한다.
+   * 캡차·2단계 인증·신규 기기 등록이 걸리면 자동화로 통과할 수 없으므로 실패 사유를 반환한다.
+   */
+  private async loginToNaver(
+    page: Page,
+    username: string,
+    password: string,
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      await page.goto('https://nid.naver.com/nidlogin.login', {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      });
+      await page.waitForTimeout(1500);
+
+      // 자동 입력 탐지 우회: 클립보드 붙여넣기 대신 타이핑
+      const idInput = await page.$('#id');
+      const pwInput = await page.$('#pw');
+      if (!idInput || !pwInput) {
+        return {
+          success: false,
+          error: '네이버 로그인 폼(아이디/비밀번호 입력란)을 찾을 수 없습니다.',
+        };
+      }
+
+      await idInput.click();
+      await page.keyboard.type(username, { delay: 50 });
+      await page.waitForTimeout(500);
+      await pwInput.click();
+      await page.keyboard.type(password, { delay: 50 });
+      await page.waitForTimeout(500);
+
+      const loginBtn = await page.$('#log\\.login, button[type="submit"]');
+      if (loginBtn) {
+        await loginBtn.click();
+      } else {
+        await page.keyboard.press('Enter');
+      }
+      await page.waitForTimeout(4000);
+
+      const afterUrl = page.url();
+
+      // 캡차 또는 기기 등록 / 2단계 인증 감지
+      const blocked = await page.evaluate(() => {
+        const bodyText = document.body?.innerText || '';
+        return (
+          document.querySelector('#captcha, .captcha, #ncaptcha') !== null ||
+          bodyText.includes('자동입력 방지') ||
+          bodyText.includes('새로운 기기') ||
+          bodyText.includes('2단계 인증') ||
+          bodyText.includes('기기 등록')
+        );
+      });
+
+      if (blocked) {
+        return {
+          success: false,
+          error:
+            '네이버 로그인이 캡차 또는 기기 등록/2단계 인증에 막혔습니다. 브라우저에서 직접 로그인 후 세션 쿠키(NID_AUT, NID_SES)를 수동으로 저장해주세요.',
+        };
+      }
+
+      if (afterUrl.includes('nid.naver.com/nidlogin.login')) {
+        return {
+          success: false,
+          error:
+            '네이버 로그인에 실패했습니다. 아이디/비밀번호를 확인하거나 세션 쿠키를 수동으로 저장해주세요.',
+        };
+      }
+
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: `네이버 로그인 중 오류: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 
@@ -2719,7 +3192,9 @@ ANSWER: [정확히 ${blankCount}글자만]`,
     }
     const fallbackDomain = blogHostname.includes('tistory.com')
       ? '.tistory.com'
-      : blogHostname;
+      : blogHostname.includes('naver.com')
+        ? '.naver.com'
+        : blogHostname;
 
     // 입력 형식별로 원시 쿠키 배열을 만든 뒤, 공통 정규화/검증을 거친다.
     let rawList: Array<Record<string, unknown>> = [];
@@ -2894,17 +3369,35 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       return { valid: false, message: '저장된 세션 쿠키가 없습니다.' };
     }
 
+    const isNaver = site.siteType === SiteType.NAVER;
+
     let browser: Browser | null = null;
     let context: BrowserContext | null = null;
 
     try {
-      const blogName =
-        (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] || '';
-      if (!blogName) {
-        return {
-          valid: false,
-          message: '블로그 URL에서 블로그명을 파싱할 수 없습니다.',
-        };
+      let verifyUrl = '';
+      if (isNaver) {
+        const blogId =
+          (site.siteUrl.match(/blog\.naver\.com\/([A-Za-z0-9_-]+)/) ||
+            [])[1] || '';
+        if (!blogId) {
+          return {
+            valid: false,
+            message: '블로그 URL에서 블로그 ID를 파싱할 수 없습니다.',
+          };
+        }
+        verifyUrl = `https://admin.blog.naver.com/${blogId}`;
+      } else {
+        const blogName =
+          (site.siteUrl.match(/https?:\/\/([^.]+)\.tistory\.com/) || [])[1] ||
+          '';
+        if (!blogName) {
+          return {
+            valid: false,
+            message: '블로그 URL에서 블로그명을 파싱할 수 없습니다.',
+          };
+        }
+        verifyUrl = `https://${blogName}.tistory.com/manage/`;
       }
 
       browser = await this.createBrowser({
@@ -2922,7 +3415,7 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       await context.addCookies(cookies);
 
       const page = await context.newPage();
-      await page.goto(`https://${blogName}.tistory.com/manage/`, {
+      await page.goto(verifyUrl, {
         waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
@@ -2930,14 +3423,17 @@ ANSWER: [정확히 ${blankCount}글자만]`,
 
       const currentUrl = page.url();
 
-      if (
-        currentUrl.includes('tistory.com/auth/login') ||
-        currentUrl.includes('accounts.kakao.com')
-      ) {
+      const expired = isNaver
+        ? currentUrl.includes('nid.naver.com')
+        : currentUrl.includes('tistory.com/auth/login') ||
+          currentUrl.includes('accounts.kakao.com');
+
+      if (expired) {
         return {
           valid: false,
-          message:
-            '세션이 만료되었습니다. 카카오 로그인 후 쿠키를 다시 저장해주세요.',
+          message: isNaver
+            ? '세션이 만료되었습니다. 네이버 로그인 후 쿠키(NID_AUT, NID_SES)를 다시 저장해주세요.'
+            : '세션이 만료되었습니다. 카카오 로그인 후 쿠키를 다시 저장해주세요.',
         };
       }
 
@@ -2967,6 +3463,102 @@ ANSWER: [정확히 ${blankCount}글자만]`,
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  // ── AI 본문 생성 ──
+
+  /**
+   * 제목(+선택 키워드/지침)을 바탕으로 Claude API로 블로그 본문(HTML)을 생성한다.
+   * CAPTCHA 솔버와 동일하게 ANTHROPIC_API_KEY + raw fetch 패턴을 사용한다.
+   */
+  async generateContent(params: {
+    title: string;
+    keywords?: string;
+    instruction?: string;
+  }): Promise<{ body: string }> {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        'AI 본문 생성이 설정되지 않았습니다. (ANTHROPIC_API_KEY 미설정)',
+      );
+    }
+
+    const title = params.title?.trim();
+    if (!title) {
+      throw new BadRequestException('제목을 입력해주세요.');
+    }
+
+    const keywordLine = params.keywords?.trim()
+      ? `\n주요 키워드(자연스럽게 포함): ${params.keywords.trim()}`
+      : '';
+    const instructionLine = params.instruction?.trim()
+      ? `\n추가 지침: ${params.instruction.trim()}`
+      : '';
+
+    const prompt = `당신은 한국어 블로그 글을 전문적으로 작성하는 작가입니다.
+아래 제목으로 SEO에 최적화된 블로그 본문을 작성하세요.
+
+제목: ${title}${keywordLine}${instructionLine}
+
+요구사항:
+- 한국어로 작성
+- 소제목(h2/h3)과 단락(p), 필요시 목록(ul/li)으로 구조화
+- 1000~1500자 분량, 자연스럽고 정보성 있는 내용
+- 과장·허위 정보 금지
+- 출력은 <h2>, <h3>, <p>, <ul>, <li>, <strong> 태그만 사용한 HTML 본문만 반환 (제목 h1, 코드블록, 마크다운, 설명 문구 없이 본문 HTML만)`;
+
+    try {
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-opus-4-8',
+          max_tokens: 8000,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        this.logger.error(`AI 본문 생성 API 오류: ${resp.status} ${errText}`);
+        throw new ServiceUnavailableException(
+          `AI 본문 생성에 실패했습니다. (${resp.status})`,
+        );
+      }
+
+      const data = await resp.json();
+      const raw = data?.content?.[0]?.text?.trim() || '';
+      if (!raw) {
+        throw new ServiceUnavailableException(
+          'AI가 본문을 생성하지 못했습니다. 다시 시도해주세요.',
+        );
+      }
+
+      // 코드펜스(```html ... ```)로 감싸서 오는 경우 제거
+      const body = raw
+        .replace(/^```[a-z]*\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+
+      return { body };
+    } catch (err) {
+      if (
+        err instanceof ServiceUnavailableException ||
+        err instanceof BadRequestException
+      ) {
+        throw err;
+      }
+      this.logger.error(
+        `AI 본문 생성 실패: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new ServiceUnavailableException(
+        'AI 본문 생성 중 오류가 발생했습니다.',
+      );
     }
   }
 

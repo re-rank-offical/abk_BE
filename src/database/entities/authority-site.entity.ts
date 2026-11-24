@@ -13,6 +13,7 @@ export enum SiteType {
   CUSTOM = 'CUSTOM', // 레거시 (기존 데이터 호환)
   TISTORY = 'TISTORY', // 티스토리 (카카오 로그인)
   LINKEDIN = 'LINKEDIN', // LinkedIn 아티클
+  NAVER = 'NAVER', // 네이버 블로그 (네이버 로그인)
 }
 
 @Entity('authority_sites')
