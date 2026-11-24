@@ -94,6 +94,28 @@ export class BacklinkSitesService implements OnApplicationBootstrap {
     return this.siteRepository.save(site);
   }
 
+  /**
+   * 로컬 에이전트(네이버)가 외부에서 발행한 결과를 이력(backlink_posts)에 기록한다.
+   * 에이전트는 DB에 접근하지 않으므로, 웹앱이 인증된 상태로 이 메서드를 호출한다.
+   */
+  async recordNaverPublish(
+    id: string,
+    userId: string,
+    data: { title: string; body: string; publishedUrl: string },
+  ): Promise<BacklinkPost> {
+    const site = await this.siteRepository.findOne({ where: { id, userId } });
+    if (!site) throw new NotFoundException('사이트를 찾을 수 없습니다.');
+    const post = this.postRepository.create({
+      authoritySiteId: site.id,
+      title: data.title,
+      body: data.body,
+      status: PostStatus.SUCCESS,
+      publishedUrl: data.publishedUrl,
+      userId,
+    });
+    return this.postRepository.save(post);
+  }
+
   async remove(id: string, userId: string): Promise<void> {
     const site = await this.siteRepository.findOne({ where: { id, userId } });
     if (!site) throw new NotFoundException('사이트를 찾을 수 없습니다.');

@@ -100,6 +100,16 @@ export class BacklinkSitesController {
     return this.service.saveCookies(id, user.userId, cookies);
   }
 
+  @Post(':id/record-naver-publish')
+  @ApiOperation({ summary: '로컬 에이전트 네이버 발행 결과를 이력에 기록' })
+  recordNaverPublish(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: { title: string; body: string; publishedUrl: string },
+  ) {
+    return this.service.recordNaverPublish(id, user.userId, body);
+  }
+
   @Post(':id/verify-session')
   @ApiOperation({ summary: '저장된 세션 쿠키 유효성 검증' })
   verifySession(@Param('id') id: string, @CurrentUser() user: AuthUser) {
