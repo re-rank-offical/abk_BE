@@ -13,7 +13,7 @@
  *  사용자 PC의 이 도우미에서 띄웁니다.)
  */
 const express = require('express');
-const { captureAndSave } = require('./naver-capture');
+const { captureAndSave, publishPost } = require('./naver-capture');
 
 const PORT = Number(process.env.NAVER_HELPER_PORT) || 4599;
 const ALLOW_ORIGINS = [
@@ -56,6 +56,33 @@ app.post('/naver-login', async (req, res) => {
       onStatus: (msg) => console.log('[naver-helper]', msg),
     });
     console.log('[naver-helper]', result.success ? '성공' : '실패', '-', result.message);
+    res.json(result);
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    console.error('[naver-helper] 오류:', message);
+    res.status(500).json({ success: false, message });
+  } finally {
+    running = false;
+  }
+});
+
+app.post('/naver-publish', async (req, res) => {
+  if (running) {
+    return res
+      .status(409)
+      .json({ success: false, message: '이미 다른 작업이 진행 중입니다. 먼저 완료해 주세요.' });
+  }
+  running = true;
+  const { site, title, body } = req.body || {};
+  console.log(`[naver-helper] 발행 요청 (site="${site || '전체'}", title="${(title || '').slice(0, 30)}")`);
+  try {
+    const result = await publishPost({
+      arg: site || '',
+      title: title || '',
+      body: body || '',
+      onStatus: (msg) => console.log('[naver-helper]', msg),
+    });
+    console.log('[naver-helper]', result.success ? '발행 성공' : '발행 실패', '-', result.message);
     res.json(result);
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
