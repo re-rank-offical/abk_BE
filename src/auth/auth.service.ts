@@ -31,11 +31,18 @@ export class AuthService {
     private readonly jwtService: JwtService,
   ) {}
 
+  /** 이메일을 소문자+공백제거로 정규화 (로그인/가입 대소문자 불일치 방지) */
+  private normalizeEmail(email: string): string {
+    return (email || '').trim().toLowerCase();
+  }
+
   async register(
     dto: RegisterDto,
   ): Promise<AuthTokens & { user: Partial<User> }> {
+    const email = this.normalizeEmail(dto.email);
+
     const existing = await this.userRepository.findOne({
-      where: { email: dto.email },
+      where: { email },
     });
 
     if (existing) {
@@ -45,7 +52,7 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.password, 10);
 
     const user = this.userRepository.create({
-      email: dto.email,
+      email,
       passwordHash,
       name: dto.name || '',
     });
@@ -65,8 +72,10 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<AuthTokens & { user: Partial<User> }> {
+    const email = this.normalizeEmail(dto.email);
+
     const user = await this.userRepository.findOne({
-      where: { email: dto.email },
+      where: { email },
     });
 
     if (!user) {
